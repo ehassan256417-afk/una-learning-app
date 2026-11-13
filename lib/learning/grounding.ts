@@ -1,4 +1,4 @@
-import type { Provenance, Section } from './types';
+import type { Provenance, Section } from './types.ts';
 
 /**
  * Grounding rules for generated content.

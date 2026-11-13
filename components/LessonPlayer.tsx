@@ -17,11 +17,12 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
+import { coursePath, sectionPath } from '@/lib/learning/links';
 import type { Course, LearningLevel, Section } from '@/lib/learning/types';
 import { LEVEL_LABELS, isDemo } from '@/lib/learning/types';
 import { sectionKey, sectionStatuses, useProgress } from '@/lib/progress/store';
 import { LionMascot } from './LionMascot';
-import { DemoTag, ProgressBar, RichText } from './ui';
+import { DemoTag, ProgressBar, RichText, SourceLine } from './ui';
 
 type Stage = 'notes' | 'quiz' | 'cards' | 'done';
 const LEVELS: LearningLevel[] = [1, 2, 3];
@@ -44,8 +45,8 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
 
   const ids = course.sections.map((s) => s.id);
   const locked = ready && stage !== 'done' && sectionStatuses(course.id, ids, state)[index] === 'locked';
-  const pathHref = `/courses/${course.id}`;
-  const exitHref = `/courses/${course.id}/${section.id}`;
+  const pathHref = coursePath(course);
+  const exitHref = sectionPath(course, section.id);
   const next = course.sections[index + 1];
 
   const answeredCount = answers.filter((a) => a !== null).length;
@@ -145,7 +146,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
             </small>
             <b>{section.title}</b>
           </div>
-          {demo && <DemoTag />}
+          {demo ? <DemoTag /> : <span className="demotag pdftag">Your PDF</span>}
         </div>
         <ProgressBar value={progressPct} label="Lesson progress" />
         <div className="levels" aria-label="Learning levels">
@@ -208,15 +209,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
                 <code>{note.example}</code>
               </pre>
             )}
-            <footer className="sourceline">
-              {isDemo(note.provenance) ? (
-                <>
-                  <DemoTag /> Sample content, not from an uploaded PDF
-                </>
-              ) : (
-                <>Source: page {note.provenance.citations[0]?.page}</>
-              )}
-            </footer>
+            <SourceLine provenance={note.provenance} demoText="Sample content, not from an uploaded PDF" />
           </article>
           <div className="dots" aria-hidden="true">
             {section.notes.map((n, i) => (
@@ -297,15 +290,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
                 <p>
                   <RichText text={q.explanation} />
                 </p>
-                <footer className="sourceline">
-                  {isDemo(q.provenance) ? (
-                    <>
-                      <DemoTag /> Sample question, not checked against a PDF
-                    </>
-                  ) : (
-                    <>Source: page {q.provenance.citations[0]?.page}</>
-                  )}
-                </footer>
+                <SourceLine provenance={q.provenance} demoText="Sample question, not checked against a PDF" />
               </div>
             )}
           </article>
@@ -347,7 +332,11 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
             <span className="flash-face flash-back">
               <small>MEANING</small>
               <b>{card.back}</b>
-              {isDemo(card.provenance) && <DemoTag />}
+              {isDemo(card.provenance) ? (
+                <DemoTag />
+              ) : (
+                card.provenance.citations[0] && <span className="pagechip">Page {card.provenance.citations[0].page}</span>
+              )}
             </span>
           </button>
           <div className="dots" aria-hidden="true">
@@ -456,7 +445,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               <RotateCcw size={18} /> Retry
             </button>
             {next ? (
-              <Link href={`/courses/${course.id}/${next.id}`} className="btn btn-gold">
+              <Link href={sectionPath(course, next.id)} className="btn btn-gold">
                 Continue to Section {index + 2} <ArrowRight size={18} />
               </Link>
             ) : (

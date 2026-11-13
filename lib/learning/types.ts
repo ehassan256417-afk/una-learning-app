@@ -15,6 +15,28 @@ export interface SourceCitation {
   page: number;
   /** Verbatim text copied from that page. */
   excerpt: string;
+  /** Result of the automated quote check: found word for word, or with small differences. */
+  support?: 'exact' | 'close';
+}
+
+/** Summary of the automated grounding check for one generated course. */
+export interface GroundingReport {
+  /** Items the AI produced. */
+  checked: number;
+  /** Items whose quotes were found in the PDF. */
+  kept: number;
+  /** Items removed because they could not be matched to the PDF. */
+  dropped: number;
+  /** A few example reasons, for display. */
+  reasons: string[];
+}
+
+export interface GenerationInfo {
+  provider: string;
+  model: string;
+  createdAt: string;
+  documentName: string;
+  report: GroundingReport;
 }
 
 export type Provenance =
@@ -88,6 +110,8 @@ export interface Course {
   accent: 'purple' | 'gold';
   sections: Section[];
   provenance: Provenance;
+  /** Present on courses generated from an uploaded PDF. */
+  generation?: GenerationInfo;
 }
 
 /** Lightweight course listing (no lesson bodies). */
@@ -101,6 +125,7 @@ export interface CourseSummary {
   accent: Course['accent'];
   sectionIds: string[];
   provenance: Provenance;
+  generation?: GenerationInfo;
 }
 
 export const isDemo = (p: Provenance): p is { kind: 'demo' } => p.kind === 'demo';

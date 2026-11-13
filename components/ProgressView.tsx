@@ -2,6 +2,8 @@
 
 import { Check, Flame, Zap } from 'lucide-react';
 import Link from 'next/link';
+import { useAllCourses } from '@/lib/learning/generated-store';
+import { coursePath, isGeneratedCourse } from '@/lib/learning/links';
 import type { CourseSummary } from '@/lib/learning/types';
 import { computeBadges } from '@/lib/progress/badges';
 import { courseProgress, levelFor, useProgress } from '@/lib/progress/store';
@@ -10,11 +12,12 @@ import { BadgeMedal, DemoTag, ProgressBar } from './ui';
 
 const DAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
-export function ProgressView({ courses }: { courses: CourseSummary[] }) {
+export function ProgressView({ courses: demoCourses }: { courses: CourseSummary[] }) {
   const { state, ready } = useProgress();
+  const { all: courses } = useAllCourses(demoCourses);
   const level = levelFor(state.xp);
   const badges = computeBadges(state, courses);
-  const sectionsDone = Object.keys(state.completed).length;
+  const sectionsDone = courses.reduce((n, c) => n + courseProgress(c.id, c.sectionIds, state).done, 0);
   const sectionsTotal = courses.reduce((n, c) => n + c.sectionIds.length, 0);
 
   // Last 7 days ending today; the streak lights the most recent days.
@@ -88,9 +91,9 @@ export function ProgressView({ courses }: { courses: CourseSummary[] }) {
               const p = courseProgress(c.id, c.sectionIds, state);
               return (
                 <li key={c.id}>
-                  <Link href={`/courses/${c.id}`}>
+                  <Link href={coursePath(c)}>
                     <span>
-                      <b>{c.code}</b> {c.title}
+                      <b>{isGeneratedCourse(c) ? 'Your PDF' : c.code}</b> {c.title}
                     </span>
                     <b>{p.pct}%</b>
                   </Link>

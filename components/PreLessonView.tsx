@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useState } from 'react';
+import { coursePath, isGeneratedCourse, lessonPath } from '@/lib/learning/links';
 import type { Course, Section } from '@/lib/learning/types';
 import { isDemo } from '@/lib/learning/types';
 import { sectionStatuses, useProgress } from '@/lib/progress/store';
@@ -63,18 +64,29 @@ export function PreLessonView({ course, section, index }: { course: Course; sect
   const status = sectionStatuses(course.id, ids, state)[index];
   const total = course.sections.length;
   const pct = Math.round((index / total) * 100);
-  const lessonHref = `/courses/${course.id}/${section.id}/lesson`;
+  const lessonHref = lessonPath(course, section.id);
+  const pathHref = coursePath(course);
   const demo = isDemo(section.provenance);
+  const fromPdf = isGeneratedCourse(course);
+  const documentName = course.generation?.documentName ?? 'your PDF';
+  const citedPages =
+    section.provenance.kind === 'pdf'
+      ? [
+          ...new Set(
+            [...section.notes, ...section.questions].flatMap((item) =>
+              item.provenance.kind === 'pdf' ? item.provenance.citations.map((c) => c.page) : [],
+            ),
+          ),
+        ].sort((a, b) => a - b)
+      : [];
 
   return (
     <main className="screen with-actionbar">
       <section className="hero hero-prelesson">
         <div className="hero-glow" aria-hidden="true" />
-        <AppHeader backHref={`/courses/${course.id}`} backLabel="Back to learning path" />
+        <AppHeader backHref={pathHref} backLabel="Back to learning path" />
         <div className="hero-title">
-          <p className="kicker">
-            {course.code} – {course.title}
-          </p>
+          <p className="kicker">{fromPdf ? course.title : `${course.code} – ${course.title}`}</p>
           <div className="progressline">
             <span>
               Section {index + 1} of {total}
@@ -177,7 +189,7 @@ export function PreLessonView({ course, section, index }: { course: Course; sect
             <small>
               {demo
                 ? 'Sample lesson. Not generated from an uploaded PDF yet.'
-                : `Generated from your uploaded course PDF (${course.code}).`}
+                : `Generated from ${documentName}${citedPages.length ? ` (pages ${citedPages.join(', ')})` : ''}.`}
             </small>
           </span>
           <Info size={20} className="info" aria-hidden="true" />
@@ -189,7 +201,7 @@ export function PreLessonView({ course, section, index }: { course: Course; sect
           <BookOpen size={18} /> Review Key Points
         </button>
         {status === 'locked' ? (
-          <Link href={`/courses/${course.id}`} className="btn btn-locked">
+          <Link href={pathHref} className="btn btn-locked">
             <Lock size={18} /> Locked
           </Link>
         ) : (
@@ -231,13 +243,21 @@ export function PreLessonView({ course, section, index }: { course: Course; sect
               from, or checked against, a real course PDF.
             </>
           ) : (
-            <>This section was generated from your uploaded PDF. Each item links to the page it came from.</>
+            <>
+              This section was generated from <strong>{documentName}</strong>. Every note and question shows the page
+              and quote it is based on.
+            </>
           )}
         </p>
-        <p>
-          When the PDF learning engine is added, every note and question will cite the page and excerpt that supports
-          it, and anything without a supporting excerpt will be left out.
-        </p>
+        {demo ? (
+          <p>Upload a PDF to get lessons where every note and question cites the page and quote that supports it.</p>
+        ) : (
+          <p>
+            Each quote was checked against your PDF automatically, and items that could not be matched were removed.
+            That check lowers the chance of mistakes but <strong>does not guarantee accuracy</strong>. Treat these
+            lessons as a study aid and confirm important points in your course material.
+          </p>
+        )}
         <button type="button" className="btn btn-gold" onClick={() => setSheet('none')}>
           Got it
         </button>

@@ -2,6 +2,8 @@
 
 import { ArrowRight, ArrowUp, BarChart3, CloudUpload, Flame, Play, Zap } from 'lucide-react';
 import Link from 'next/link';
+import { useAllCourses } from '@/lib/learning/generated-store';
+import { sectionPath } from '@/lib/learning/links';
 import type { CourseSummary } from '@/lib/learning/types';
 import { computeBadges } from '@/lib/progress/badges';
 import { levelFor, sectionStatuses, useProgress } from '@/lib/progress/store';
@@ -14,13 +16,15 @@ import { BadgeMedal, DemoTag } from './ui';
 function nextLessonHref(courses: CourseSummary[], state: ReturnType<typeof useProgress>['state']) {
   for (const c of courses) {
     const i = sectionStatuses(c.id, c.sectionIds, state).indexOf('active');
-    if (i >= 0) return `/courses/${c.id}/${c.sectionIds[i]}`;
+    if (i >= 0) return sectionPath(c, c.sectionIds[i]);
   }
   return '/courses';
 }
 
-export function DashboardView({ courses }: { courses: CourseSummary[] }) {
+export function DashboardView({ courses: demoCourses }: { courses: CourseSummary[] }) {
   const { state } = useProgress();
+  // The student's PDF courses come first, then the sample courses.
+  const { all: courses, generated } = useAllCourses(demoCourses);
   const level = levelFor(state.xp);
   const badges = computeBadges(state, courses);
   const earned = badges.filter((b) => b.earned).length;
@@ -88,7 +92,10 @@ export function DashboardView({ courses }: { courses: CourseSummary[] }) {
           <Play size={20} fill="currentColor" /> Start Learning <ArrowRight size={20} />
         </Link>
         <p className="demo-line">
-          <DemoTag /> Sample courses and stats. No real PDF has been analyzed.
+          <DemoTag />{' '}
+          {generated.length > 0
+            ? 'Courses marked Demo and the starting stats are sample content.'
+            : 'Sample courses and stats. Upload a PDF to build your own lessons.'}
         </p>
 
         <div className="sectionhead">

@@ -7,3 +7,5 @@ out/
 *.tsbuildinfo
 .claude/
 .DS_Store
+# Copied from node_modules at build time
+public/pdf.worker.min.mjs

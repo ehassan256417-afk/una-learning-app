@@ -2,6 +2,7 @@
 
 import { BookOpen, Flame, Layers, Lock, Star, Target, Trophy, X } from 'lucide-react';
 import { Fragment, useEffect } from 'react';
+import type { Provenance } from '@/lib/learning/types';
 import type { Badge, BadgeIcon } from '@/lib/progress/badges';
 
 export function ProgressBar({
@@ -53,6 +54,35 @@ export function RichText({ text, highlight }: { text: string; highlight?: string
         return <Fragment key={i}>{part}</Fragment>;
       })}
     </>
+  );
+}
+
+/**
+ * Where a piece of content comes from: a demo label, or the PDF page and quote
+ * that an automated check matched. The wording stays modest on purpose: the
+ * check finds the quote on the page, it does not prove the statement is right.
+ */
+export function SourceLine({ provenance, demoText }: { provenance: Provenance; demoText: string }) {
+  if (provenance.kind === 'demo') {
+    return (
+      <footer className="sourceline">
+        <DemoTag /> {demoText}
+      </footer>
+    );
+  }
+  const citation = provenance.citations[0];
+  if (!citation) return null;
+  return (
+    <footer className="sourceline cite">
+      <span className="pagechip">Page {citation.page}</span>
+      <span>
+        <q>{citation.excerpt}</q>
+        <em>
+          {citation.support === 'close' ? 'A close match for this quote' : 'This quote'} was found on page{' '}
+          {citation.page} of your PDF by an automated check.
+        </em>
+      </span>
+    </footer>
   );
 }
 

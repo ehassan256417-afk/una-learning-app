@@ -1,13 +1,15 @@
 'use client';
 
-import { Check, Clock, Lock, Star, Trophy, Zap } from 'lucide-react';
+import { Check, Clock, Lock, ShieldCheck, Star, Trash2, Trophy, Zap } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
+import { deleteGeneratedCourse } from '@/lib/learning/generated-store';
+import { isGeneratedCourse, sectionPath } from '@/lib/learning/links';
 import type { Course } from '@/lib/learning/types';
 import { isDemo } from '@/lib/learning/types';
 import { courseProgress, sectionStatuses, useProgress } from '@/lib/progress/store';
 import { AppHeader } from './AppHeader';
-import { DemoTag, ProgressBar } from './ui';
+import { DemoTag, ProgressBar, Sheet } from './ui';
 
 // Path geometry in px. Nodes zig-zag; an SVG line is drawn through their centres.
 const ROW = 128;
@@ -39,7 +41,9 @@ export function PathView({ course }: { course: Course }) {
   const reached = activeIndex >= 0 ? activeIndex : ids.length - 1;
   const [toast, setToast] = useState('');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeRef = useRef<HTMLButtonElement | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const fromPdf = isGeneratedCourse(course);
+  const report = course.generation?.report;
 
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
 
@@ -51,7 +55,7 @@ export function PathView({ course }: { course: Course }) {
       timer.current = setTimeout(() => setToast(''), 2800);
       return;
     }
-    router.push(`/courses/${course.id}/${ids[i]}`);
+    router.push(sectionPath(course, ids[i]));
   };
 
   const total = course.sections.length;
@@ -62,11 +66,10 @@ export function PathView({ course }: { course: Course }) {
         <AppHeader backHref="/courses" backLabel="Back to courses" />
         <div className="hero-title">
           <p className="kicker">
-            {course.code} – {course.title} {isDemo(course.provenance) && <DemoTag />}
+            {fromPdf ? course.unitTitle : `${course.code} – ${course.title}`}{' '}
+            {isDemo(course.provenance) ? <DemoTag /> : <span className="demotag pdftag">Your PDF</span>}
           </p>
-          <h1>
-            {course.unitLabel}: <span>{course.unitTitle}</span>
-          </h1>
+          <h1>{fromPdf ? course.title : <>{course.unitLabel}: <span>{course.unitTitle}</span></>}</h1>
           <div className="progressline">
             <span>
               {progress.done} of {progress.total} sections
@@ -76,6 +79,23 @@ export function PathView({ course }: { course: Course }) {
           <ProgressBar value={progress.pct} label="Course progress" />
         </div>
       </section>
+
+      {fromPdf && report && (
+        <div className="pad">
+          <div className="note note-info checknote">
+            <ShieldCheck size={20} />
+            <span>
+              <b>
+                {report.kept} of {report.checked} generated items matched your PDF.
+              </b>{' '}
+              {report.dropped > 0 && `${report.dropped} that could not be matched were removed. `}
+              This is an automated check of quotes and page numbers. It reduces mistakes but cannot guarantee
+              accuracy, so compare with your course material.
+              {course.generation?.provider === 'mock' && ' Built in offline sample mode (no AI).'}
+            </span>
+          </div>
+        </div>
+      )}
 
       <section className="path" style={{ height: TOP + total * ROW + 96 }} aria-label="Learning path">
         <svg className="path-line" width="160" height={TOP + total * ROW} aria-hidden="true">
@@ -88,7 +108,6 @@ export function PathView({ course }: { course: Course }) {
           return (
             <button
               key={s.id}
-              ref={status === 'active' ? activeRef : undefined}
               type="button"
               className={`node node-${status}`}
               style={{ top: TOP + i * ROW, paddingLeft: OFFSETS[i % OFFSETS.length] }}
@@ -122,6 +141,35 @@ export function PathView({ course }: { course: Course }) {
           <span>{progress.pct === 100 ? 'Course complete. Nice work, Lion!' : `Finish all ${total} sections to complete the course`}</span>
         </div>
       </section>
+
+      {fromPdf && (
+        <div className="pad">
+          <button type="button" className="textlink danger center" onClick={() => setConfirmRemove(true)}>
+            <Trash2 size={16} /> Remove this course
+          </button>
+        </div>
+      )}
+      <Sheet open={confirmRemove} onClose={() => setConfirmRemove(false)} title="Remove this course?">
+        <p>
+          The lessons generated from this PDF will be deleted from this device. Your XP stays. To get them back you
+          would need to upload the PDF again.
+        </p>
+        <div className="actionbar inline">
+          <button type="button" className="btn btn-outline" onClick={() => setConfirmRemove(false)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-gold"
+            onClick={() => {
+              deleteGeneratedCourse(course.id);
+              router.push('/courses');
+            }}
+          >
+            Remove
+          </button>
+        </div>
+      </Sheet>
 
       <div className={`toast ${toast ? 'show' : ''}`} role="status" aria-live="polite">
         <Lock size={16} /> {toast}

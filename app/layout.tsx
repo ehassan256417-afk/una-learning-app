@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Poppins } from 'next/font/google';
+import { Suspense } from 'react';
 import { BottomNav } from '@/components/BottomNav';
 import { ProgressProvider } from '@/lib/progress/store';
 import './globals.css';
@@ -31,7 +32,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <ProgressProvider>
           <div className="app">
             {children}
-            <BottomNav />
+            <Suspense fallback={null}>
+              <BottomNav />
+            </Suspense>
           </div>
         </ProgressProvider>
       </body>
