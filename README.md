@@ -33,12 +33,12 @@ npm run server     # lesson backend at http://127.0.0.1:8787 (second terminal)
 
 Without a key the backend runs in **offline sample mode**: it builds lessons by copying sentences from the PDF and blanking out words. That exercises the whole flow but is not AI.
 
-To use real AI, copy `server/.env.example` to `.env` in the project root and set `ZRO_API_KEY` (create it at https://zro.moonmath.ai under Account, API keys; give the key a spend quota and an expiry date). `.env` is git-ignored. Optional settings: `ZRO_MODEL`, `ZRO_REASONING_EFFORT` (`none`, `low`, `high`, `max`; default `low`) and `ZRO_MAX_TOKENS` (default 16000). ZRO bills by usage: its pricing page lists free daily usage on `deepseek-v4.1-flash`, and anything beyond that draws on a plan or usage pack.
+To use real AI, copy `server/.env.example` to `.env` in the project root and set `ZRO_API_KEY` (create it at https://zro.moonmath.ai under Account, API keys; give the key a spend quota and an expiry date). `.env` is git-ignored. Optional settings: `ZRO_MODEL`, `ZRO_REASONING_EFFORT` (`none`, `low`, `high`, `max`; default `none`) and `ZRO_MAX_TOKENS` (default 32000). Reasoning tokens count against `ZRO_MAX_TOKENS`: with `low` and 16000, a 7-page PDF used the whole allowance on reasoning and returned no lesson. ZRO bills by usage: its pricing page lists free daily usage on `deepseek-v4.1-flash`, and anything beyond that draws on a plan or usage pack.
 
 `node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
 ```bash
-npm test           # 78 tests, Node's built-in runner
+npm test           # 79 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```

@@ -18,7 +18,7 @@ export interface ZroOptions {
   apiKey: string;
   model?: string;
   baseUrl?: string;
-  /** Reasoning levels listed for deepseek-v4.1-flash. Kept low so reasoning does not crowd out the answer. */
+  /** Reasoning levels listed for deepseek-v4.1-flash: none, low, high, max. Defaults to none. */
   reasoningEffort?: string;
   maxTokens?: number;
   timeoutMs?: number;
@@ -28,7 +28,15 @@ export interface ZroOptions {
 /** The model ZRO recommends, and the one its free daily usage applies to. */
 export const DEFAULT_ZRO_MODEL = 'deepseek-v4.1-flash';
 export const DEFAULT_ZRO_BASE_URL = 'https://zro.moonmath.ai/v1';
-export const DEFAULT_ZRO_MAX_TOKENS = 16_000;
+/**
+ * Reasoning tokens are billed as output and count against `max_tokens`. With
+ * reasoning on, a 7-page PDF spent the whole 16,000-token allowance thinking
+ * and returned no lesson (finish_reason "length", empty content). Reasoning is
+ * therefore off by default, and the allowance leaves room for a full lesson
+ * (about 4,500 tokens for a 3-page document; the model's limit is 64,000).
+ */
+export const DEFAULT_ZRO_REASONING_EFFORT: ZroReasoningEffort = 'none';
+export const DEFAULT_ZRO_MAX_TOKENS = 32_000;
 const REASONING_LEVELS: readonly string[] = ['none', 'low', 'high', 'max'];
 
 interface ChatCompletionResponse {
@@ -115,7 +123,7 @@ export class ZroProvider implements AiProvider {
 
   constructor(options: ZroOptions) {
     if (!options.apiKey) throw new ProviderError('not_configured', 'ZRO_API_KEY is not set on the server.');
-    const effort = (options.reasoningEffort || 'low').toLowerCase();
+    const effort = (options.reasoningEffort || DEFAULT_ZRO_REASONING_EFFORT).toLowerCase();
     if (!REASONING_LEVELS.includes(effort)) {
       throw new ProviderError('not_configured', 'ZRO_REASONING_EFFORT must be one of: none, low, high, max.');
     }
@@ -193,11 +201,18 @@ export class ZroProvider implements AiProvider {
     }
 
     const completion = await this.#readCompletion(response);
+    if (completion.finishReason === 'length') {
+      // No text at all means the allowance went on reasoning before the lesson
+      // started: lower ZRO_REASONING_EFFORT or raise ZRO_MAX_TOKENS.
+      throw new ProviderError(
+        'failed',
+        completion.text.trim()
+          ? 'The AI response was cut off before the lesson was complete. Try a shorter PDF.'
+          : 'The AI used its whole output allowance before it started writing the lesson. Please try again.',
+      );
+    }
     if (!completion.text.trim()) {
       throw new ProviderError('failed', `The AI provider returned no content (${completion.finishReason || 'empty response'}).`);
-    }
-    if (completion.finishReason === 'length') {
-      throw new ProviderError('failed', 'The AI response was cut off. Try a shorter PDF.');
     }
     return completion.text;
   }

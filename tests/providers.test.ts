@@ -83,8 +83,10 @@ describe('ZroProvider', () => {
       { role: 'user', content: 'PROMPT TEXT' },
     ]);
     expect(sent.response_format).toEqual({ type: 'json_object' });
-    expect(sent.reasoning_effort).toBe('low');
+    // Reasoning is off by default: its tokens count against max_tokens and once used up the whole allowance.
+    expect(sent.reasoning_effort).toBe('none');
     expect(sent.max_tokens).toBe(DEFAULT_ZRO_MAX_TOKENS);
+    expect(DEFAULT_ZRO_MAX_TOKENS).toBeGreaterThanOrEqual(32_000);
     expect(sent.stream).toBe(true);
   });
 
@@ -142,6 +144,34 @@ describe('ZroProvider', () => {
 
     const empty = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([event(null, 'stop'), 'data: [DONE]\n\n']) });
     await expect(empty.generate(request)).rejects.toMatchObject({ code: 'failed' });
+  });
+
+  it('explains an allowance spent entirely on reasoning, and never returns reasoning text as the lesson', async () => {
+    const thinking = (text: string, finish: string | null = null) =>
+      `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: text }, finish_reason: finish }] })}\n\n`;
+
+    // What happened with a 7-page PDF: reasoning only, then finish_reason "length" and no content.
+    const exhausted = new ZroProvider({
+      apiKey: 'k',
+      fetchImpl: sseFetch([thinking('Let me plan the lesson'), thinking(' in detail...'), event(null, 'length'), 'data: [DONE]\n\n']),
+    });
+    const err = await exhausted.generate(request).catch((e: unknown) => e as ProviderError);
+    expect(err).toMatchObject({ name: 'ProviderError', code: 'failed' });
+    expect((err as ProviderError).message).toContain('output allowance');
+    expect((err as ProviderError).message).not.toContain('(length)');
+    expect((err as ProviderError).message).not.toContain('plan the lesson');
+
+    // A partly written lesson is reported as cut off, not as "no content".
+    const partial = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([event('{"sections":['), event(null, 'length')]) });
+    const cut = await partial.generate(request).catch((e: unknown) => e as ProviderError);
+    expect((cut as ProviderError).message).toContain('cut off');
+
+    // Reasoning text that precedes a complete answer is dropped.
+    const mixed = new ZroProvider({
+      apiKey: 'k',
+      fetchImpl: sseFetch([thinking('thinking...'), event('{"sections":[]}'), event(null, 'stop'), 'data: [DONE]\n\n']),
+    });
+    expect(await mixed.generate(request)).toBe('{"sections":[]}');
   });
 
   it('gives up when the stream stalls past the timeout', async () => {
