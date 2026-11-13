@@ -38,10 +38,75 @@ interface ChatCompletionResponse {
   }>;
 }
 
+interface ChatCompletionChunk {
+  choices?: Array<{
+    finish_reason?: string | null;
+    delta?: { content?: string | null };
+  }>;
+  error?: unknown;
+}
+
+interface Completion {
+  text: string;
+  finishReason?: string;
+}
+
+/**
+ * Reads a server-sent-events stream of chat completion chunks.
+ * A stream that reports an error, or ends before the model said it was done,
+ * is rejected so a half-written lesson is never passed on.
+ */
+async function readStream(body: ReadableStream<Uint8Array>): Promise<Completion> {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let buffer = '';
+  let text = '';
+  let finishReason: string | undefined;
+  let done = false;
+
+  const handle = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === '[DONE]') {
+      done = true;
+      return;
+    }
+    let chunk: ChatCompletionChunk;
+    try {
+      chunk = JSON.parse(data) as ChatCompletionChunk;
+    } catch {
+      return; // Ignore a malformed event; a truncated answer is caught below.
+    }
+    if (chunk.error) throw new ProviderError('failed', 'The AI provider reported an error while writing the lesson.');
+    const choice = chunk.choices?.[0];
+    if (typeof choice?.delta?.content === 'string') text += choice.delta.content;
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+  };
+
+  for (;;) {
+    const { value, done: ended } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+    let newline: number;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      handle(buffer.slice(0, newline).replace(/\r$/, ''));
+      buffer = buffer.slice(newline + 1);
+    }
+    if (ended) break;
+  }
+  handle(buffer.trim());
+
+  if (!finishReason && !done) {
+    throw new ProviderError('failed', 'The AI response ended before it was complete. Try again.');
+  }
+  return { text, finishReason };
+}
+
 export class ZroProvider implements AiProvider {
   readonly id = 'zro';
   readonly model: string;
-  private apiKey: string;
+  /** A true private field, so the key is left out if the provider object is ever logged or serialized. */
+  #apiKey: string;
   private baseUrl: string;
   private reasoningEffort: ZroReasoningEffort;
   private maxTokens: number;
@@ -59,43 +124,55 @@ export class ZroProvider implements AiProvider {
     if (!/^https:\/\//i.test(baseUrl) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?(\/|$)/i.test(baseUrl)) {
       throw new ProviderError('not_configured', 'The ZRO base URL must use https.');
     }
-    this.apiKey = options.apiKey;
+    this.#apiKey = options.apiKey;
     this.model = options.model || DEFAULT_ZRO_MODEL;
     this.baseUrl = baseUrl;
     this.reasoningEffort = effort as ZroReasoningEffort;
     this.maxTokens = options.maxTokens && options.maxTokens > 0 ? Math.floor(options.maxTokens) : DEFAULT_ZRO_MAX_TOKENS;
-    this.timeoutMs = options.timeoutMs ?? 120_000;
+    // Covers the whole streamed answer, not just the first byte.
+    this.timeoutMs = options.timeoutMs ?? 240_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
   async generate(request: LessonRequest): Promise<string> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let response: Response;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify({
-          model: this.model,
-          messages: [
-            { role: 'system', content: request.system },
-            { role: 'user', content: request.prompt },
-          ],
-          temperature: 0.2,
-          max_tokens: this.maxTokens,
-          reasoning_effort: this.reasoningEffort,
-          response_format: { type: 'json_object' },
-          stream: false,
-        }),
-      });
+      return await this.#request(request, controller.signal);
     } catch (err) {
-      const timedOut = err instanceof Error && err.name === 'AbortError';
+      if (err instanceof ProviderError) throw err;
+      const timedOut = controller.signal.aborted || (err instanceof Error && err.name === 'AbortError');
       throw new ProviderError('failed', timedOut ? 'The AI provider took too long to respond.' : 'Could not reach the AI provider.');
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async #request(request: LessonRequest, signal: AbortSignal): Promise<string> {
+    // The answer is streamed: a long lesson sent as one non-streamed response
+    // can outlast the provider's proxy timeout (seen as HTTP 524).
+    const response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
+      method: 'POST',
+      signal,
+      headers: {
+        'content-type': 'application/json',
+        accept: 'text/event-stream',
+        authorization: `Bearer ${this.#apiKey}`,
+      },
+      body: JSON.stringify({
+        model: this.model,
+        messages: [
+          { role: 'system', content: request.system },
+          { role: 'user', content: request.prompt },
+        ],
+        temperature: 0.2,
+        max_tokens: this.maxTokens,
+        reasoning_effort: this.reasoningEffort,
+        response_format: { type: 'json_object' },
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
 
     // Status meanings are from the ZRO API reference. The provider's error body
     // is never forwarded: it can echo request details.
@@ -115,15 +192,27 @@ export class ZroProvider implements AiProvider {
       throw new ProviderError('failed', `The AI provider returned an error (HTTP ${response.status}).`);
     }
 
-    const data = (await response.json().catch(() => null)) as ChatCompletionResponse | null;
-    const choice = data?.choices?.[0];
-    const text = typeof choice?.message?.content === 'string' ? choice.message.content : '';
-    if (!text.trim()) {
-      throw new ProviderError('failed', `The AI provider returned no content (${choice?.finish_reason || 'empty response'}).`);
+    const completion = await this.#readCompletion(response);
+    if (!completion.text.trim()) {
+      throw new ProviderError('failed', `The AI provider returned no content (${completion.finishReason || 'empty response'}).`);
     }
-    if (choice?.finish_reason === 'length') {
+    if (completion.finishReason === 'length') {
       throw new ProviderError('failed', 'The AI response was cut off. Try a shorter PDF.');
     }
-    return text;
+    return completion.text;
+  }
+
+  /** Accepts the streamed form, and a plain JSON body in case the provider ignores `stream`. */
+  async #readCompletion(response: Response): Promise<Completion> {
+    const type = response.headers.get('content-type') ?? '';
+    if (type.includes('application/json') || !response.body) {
+      const data = (await response.json().catch(() => null)) as ChatCompletionResponse | null;
+      const choice = data?.choices?.[0];
+      return {
+        text: typeof choice?.message?.content === 'string' ? choice.message.content : '',
+        finishReason: choice?.finish_reason,
+      };
+    }
+    return readStream(response.body);
   }
 }

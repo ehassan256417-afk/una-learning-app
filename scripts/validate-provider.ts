@@ -48,7 +48,26 @@ interface Usage {
   totalTokenCount?: number;
 }
 
+interface OpenAiUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  completion_tokens_details?: { reasoning_tokens?: number };
+  prompt_tokens_details?: { cached_tokens?: number };
+}
+
+const fromOpenAiUsage = (u: OpenAiUsage): Usage => ({
+  promptTokenCount: u.prompt_tokens,
+  candidatesTokenCount: u.completion_tokens,
+  thoughtsTokenCount: u.completion_tokens_details?.reasoning_tokens,
+  totalTokenCount: u.total_tokens,
+});
+
 interface ApiCall {
+  /** Time until the response headers arrived. */
+  firstByteMs?: number;
+  streamed?: boolean;
+  /** Total time until the whole body was read. */
   ms: number;
   status: number;
   finishReason?: string;
@@ -84,18 +103,52 @@ function applyOverrides(init: RequestInit | undefined): RequestInit | undefined 
   return { ...init, body: JSON.stringify(body) };
 }
 
+/**
+ * VALIDATE_MAX_CALLS=1 is a hard budget for the whole run: once that many
+ * requests have been started, further ones (for example the pipeline's retry
+ * after invalid JSON) are refused locally and never reach the network.
+ */
+const maxCalls = Number(process.env.VALIDATE_MAX_CALLS) || undefined;
+let callsStarted = 0;
+
 /** Wraps fetch to time each call and read the usage block from a copy of the response. */
 const meteredFetch: typeof fetch = async (input, rawInit) => {
+  if (maxCalls && callsStarted >= maxCalls) throw new Error('call budget reached');
+  callsStarted++;
   const init = applyOverrides(rawInit);
   const started = performance.now();
   const requestChars = typeof init?.body === 'string' ? init.body.length : 0;
   try {
     const response = await fetch(input, init);
-    const ms = Math.round(performance.now() - started);
-    const call: ApiCall = { ms, status: response.status, requestChars, responseChars: 0 };
+    const firstByteMs = Math.round(performance.now() - started);
+    const call: ApiCall = { ms: firstByteMs, firstByteMs, status: response.status, requestChars, responseChars: 0 };
     try {
       const text = await response.clone().text();
+      call.ms = Math.round(performance.now() - started);
       call.responseChars = text.length;
+      if (/^\s*(data|event|:)/.test(text)) {
+        // Streamed (server-sent events): the finish reason and usage arrive in late chunks.
+        call.streamed = true;
+        for (const line of text.split(/\r?\n/)) {
+          if (!line.startsWith('data:') || line.includes('[DONE]')) continue;
+          try {
+            const chunk = JSON.parse(line.slice(5)) as {
+              model?: string;
+              choices?: Array<{ finish_reason?: string | null }>;
+              usage?: OpenAiUsage;
+              error?: { type?: string; message?: string };
+            };
+            call.modelVersion = chunk.model ?? call.modelVersion;
+            call.finishReason = chunk.choices?.[0]?.finish_reason ?? call.finishReason;
+            if (chunk.usage) call.usage = fromOpenAiUsage(chunk.usage);
+            if (chunk.error) call.error = `${chunk.error.type ?? ''}: ${(chunk.error.message ?? '').slice(0, 300)}`;
+          } catch {
+            // Skip a malformed event.
+          }
+        }
+        calls.push(call);
+        return response;
+      }
       // Gemini and OpenAI-style (ZRO) responses name these fields differently.
       const data = JSON.parse(text) as {
         candidates?: Array<{ finishReason?: string }>;
@@ -103,24 +156,12 @@ const meteredFetch: typeof fetch = async (input, rawInit) => {
         modelVersion?: string;
         choices?: Array<{ finish_reason?: string }>;
         model?: string;
-        usage?: {
-          prompt_tokens?: number;
-          completion_tokens?: number;
-          total_tokens?: number;
-          completion_tokens_details?: { reasoning_tokens?: number };
-        };
+        usage?: OpenAiUsage;
         error?: { status?: string; type?: string; message?: string };
       };
       call.finishReason = data.candidates?.[0]?.finishReason ?? data.choices?.[0]?.finish_reason;
       call.modelVersion = data.modelVersion ?? data.model;
-      call.usage =
-        data.usageMetadata ??
-        (data.usage && {
-          promptTokenCount: data.usage.prompt_tokens,
-          candidatesTokenCount: data.usage.completion_tokens,
-          thoughtsTokenCount: data.usage.completion_tokens_details?.reasoning_tokens,
-          totalTokenCount: data.usage.total_tokens,
-        });
+      call.usage = data.usageMetadata ?? (data.usage && fromOpenAiUsage(data.usage));
       if (data.error) {
         call.error = `${data.error.status ?? data.error.type ?? ''}: ${(data.error.message ?? '').slice(0, 300)}`;
       }
@@ -266,7 +307,7 @@ for (const key of keys) {
   console.log(`\n[${key}] provider=${provider.id} model=${provider.model} totalMs=${report.totalMs} calls=${calls.length}`);
   for (const c of calls) {
     console.log(
-      `  call: HTTP ${c.status} ${c.ms}ms finish=${c.finishReason ?? '-'} ` +
+      `  call: HTTP ${c.status} ${c.ms}ms (headers after ${c.firstByteMs ?? '-'}ms, streamed=${c.streamed ?? false}) finish=${c.finishReason ?? '-'} ` +
         `tokens(prompt=${c.usage?.promptTokenCount ?? '-'}, output=${c.usage?.candidatesTokenCount ?? '-'}, ` +
         `thinking=${c.usage?.thoughtsTokenCount ?? '-'}, total=${c.usage?.totalTokenCount ?? '-'})` +
         (c.error ? ` error=${c.error}` : ''),

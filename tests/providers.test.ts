@@ -72,6 +72,9 @@ describe('ZroProvider', () => {
     expect(calls[0].init.method).toBe('POST');
     expect((calls[0].init.headers as Record<string, string>).authorization).toBe('Bearer sk-SECRET-123');
     expect(String(calls[0].init.body)).not.toContain('sk-SECRET-123');
+    // Logging or serializing the provider object must not reveal the key.
+    expect(JSON.stringify(provider)).not.toContain('sk-SECRET-123');
+    expect(JSON.stringify(Object.entries(provider))).not.toContain('sk-SECRET-123');
 
     const sent = JSON.parse(String(calls[0].init.body));
     expect(sent.model).toBe(DEFAULT_ZRO_MODEL);
@@ -82,7 +85,80 @@ describe('ZroProvider', () => {
     expect(sent.response_format).toEqual({ type: 'json_object' });
     expect(sent.reasoning_effort).toBe('low');
     expect(sent.max_tokens).toBe(DEFAULT_ZRO_MAX_TOKENS);
-    expect(sent.stream).toBe(false);
+    expect(sent.stream).toBe(true);
+  });
+
+  /** Replies with a server-sent-events body, split into the given network chunks. */
+  function sseFetch(parts: string[]) {
+    return (async () => {
+      const encoder = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const part of parts) controller.enqueue(encoder.encode(part));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }) as unknown as typeof fetch;
+  }
+  const event = (content: string | null, finish: string | null = null) =>
+    `data: ${JSON.stringify({ choices: [{ delta: content === null ? {} : { content }, finish_reason: finish }] })}\n\n`;
+
+  it('joins a streamed answer, even when events are split across network chunks', async () => {
+    const stream =
+      event('{"sect') +
+      ': keep-alive comment\n\n' +
+      event('ions":') +
+      event('[]}') +
+      event(null, 'stop') +
+      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } })}\n\n` +
+      'data: [DONE]\n\n';
+    const whole = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([stream]) });
+    expect(await whole.generate(request)).toBe('{"sections":[]}');
+
+    const cut = Math.floor(stream.length / 3);
+    const pieces = [stream.slice(0, 7), stream.slice(7, cut), stream.slice(cut, cut * 2 + 5), stream.slice(cut * 2 + 5)];
+    const split = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch(pieces) });
+    expect(await split.generate(request)).toBe('{"sections":[]}');
+
+    const crlf = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([stream.replace(/\n/g, '\r\n')]) });
+    expect(await crlf.generate(request)).toBe('{"sections":[]}');
+  });
+
+  it('rejects a stream that is cut off, reports an error, or stops at the token limit', async () => {
+    const broken = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([event('{"sections":[')]) });
+    await expect(broken.generate(request)).rejects.toMatchObject({ name: 'ProviderError', code: 'failed' });
+
+    const errored = new ZroProvider({
+      apiKey: 'k',
+      fetchImpl: sseFetch([event('{"se'), `data: ${JSON.stringify({ error: { message: 'upstream sk-x', type: 'server_error' } })}\n\n`]),
+    });
+    const err = await errored.generate(request).catch((e: unknown) => e as ProviderError);
+    expect(err).toMatchObject({ code: 'failed' });
+    expect((err as ProviderError).message).not.toContain('upstream');
+
+    const limit = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([event('{"sections":['), event(null, 'length'), 'data: [DONE]\n\n']) });
+    await expect(limit.generate(request)).rejects.toMatchObject({ code: 'failed' });
+
+    const empty = new ZroProvider({ apiKey: 'k', fetchImpl: sseFetch([event(null, 'stop'), 'data: [DONE]\n\n']) });
+    await expect(empty.generate(request)).rejects.toMatchObject({ code: 'failed' });
+  });
+
+  it('gives up when the stream stalls past the timeout', async () => {
+    const impl = ((_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((resolve) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(event('{"se')));
+            init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+          },
+        });
+        resolve(new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+      })) as unknown as typeof fetch;
+    const provider = new ZroProvider({ apiKey: 'k', timeoutMs: 30, fetchImpl: impl });
+    const err = await provider.generate(request).catch((e: unknown) => e as ProviderError);
+    expect(err).toMatchObject({ name: 'ProviderError', code: 'failed' });
+    expect((err as ProviderError).message).toContain('too long');
   });
 
   it('applies model, reasoning, token and base URL options', async () => {
