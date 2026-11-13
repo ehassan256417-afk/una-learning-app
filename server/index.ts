@@ -35,6 +35,6 @@ createServer(app).listen(port, host, () => {
   console.log(`[lessons] provider: ${provider.id} (${provider.model})`);
   console.log(`[lessons] allowed origins: ${allowedOrigins.join(', ')}`);
   if (provider.id === 'mock') {
-    console.log('[lessons] No GEMINI_API_KEY set: running in offline sample mode (no AI calls).');
+    console.log('[lessons] No ZRO_API_KEY set: running in offline sample mode (no AI calls).');
   }
 });

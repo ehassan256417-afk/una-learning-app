@@ -2,7 +2,7 @@ import type { ExtractedPage } from '../../lib/learning/contracts.ts';
 
 /**
  * AI provider abstraction. The lesson pipeline only depends on this interface,
- * so providers (Gemini today) can be swapped without touching generation,
+ * so providers (ZRO, Gemini, the offline mock) can be swapped without touching generation,
  * verification or the HTTP layer.
  */
 

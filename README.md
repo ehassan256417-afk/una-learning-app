@@ -15,7 +15,8 @@ Live demo (static frontend): https://ehassan256417-afk.github.io/una-learning-ap
 | PDF text extraction with page numbers | Working in the browser; the file never leaves the device |
 | Lesson backend (`server/`) with provider abstraction | Working locally |
 | Offline sample provider (no AI, no key) | Working, used by tests and local development |
-| Gemini provider (free tier) | Implemented and unit-tested against a mocked API. **Not yet run against the real API** (needs a key) |
+| ZRO provider (primary, `deepseek-v4.1-flash`) | Implemented from the ZRO API reference and unit-tested against a mocked API. **Not yet run against the real API** (needs a key) |
+| Gemini provider (optional) | Kept as an alternative. Run against the real API on 2026-11-13: the default model `gemini-2.5-flash` is retired for new keys, newer models often returned HTTP 503, and the 8,192 output-token cap cut lessons off. Not recommended without changes |
 | Grounding check of generated content against the PDF | Working |
 | Saved lessons (no repeated AI requests) | Working: browser storage plus a short-lived backend cache |
 | Hosted AI backend | **Not deployed.** The live site shows "not connected" on the Upload screen |
@@ -32,10 +33,12 @@ npm run server     # lesson backend at http://127.0.0.1:8787 (second terminal)
 
 Without a key the backend runs in **offline sample mode**: it builds lessons by copying sentences from the PDF and blanking out words. That exercises the whole flow but is not AI.
 
-To use Gemini, copy `server/.env.example` to `.env` in the project root and set `GEMINI_API_KEY` (free-tier key from Google AI Studio; do not enable billing). `.env` is git-ignored.
+To use real AI, copy `server/.env.example` to `.env` in the project root and set `ZRO_API_KEY` (create it at https://zro.moonmath.ai under Account, API keys; give the key a spend quota and an expiry date). `.env` is git-ignored. Optional settings: `ZRO_MODEL`, `ZRO_REASONING_EFFORT` (`none`, `low`, `high`, `max`; default `low`) and `ZRO_MAX_TOKENS` (default 16000). ZRO bills by usage: its pricing page lists free daily usage on `deepseek-v4.1-flash`, and anything beyond that draws on a plan or usage pack.
+
+`node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
 ```bash
-npm test           # 62 tests, Node's built-in runner
+npm test           # 71 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```
@@ -47,7 +50,7 @@ Browser (GitHub Pages, static)                Lesson backend (server/, not deplo
 ------------------------------                -------------------------------------
 PDF file  -> validate -> extract text         POST /api/lessons/generate
              (pdf.js, on device)       ---->    validate request, rate-limit
-only { page, text } is sent                     AI provider (Gemini | offline mock)
+only { page, text } is sent                     AI provider (ZRO | offline mock)   
                                                 parse JSON, check every item against
 course saved in browser storage  <----          the page text, drop what fails
 opened via /my?c=...                            return verified course
@@ -95,12 +98,12 @@ The backend is intentionally not deployed. Review these first:
 - [ ] **Authentication.** There is none. CORS only restricts browsers; anyone can call the API directly. Add sign-in or signed requests.
 - [ ] **Rate limits.** Per-address and daily caps are in memory and reset on restart. Use a shared store if there is more than one instance, and set `DAILY_GENERATION_CAP` to fit the free quota.
 - [ ] **Origin allow-list.** Set `ALLOWED_ORIGINS` to the exact site origin (for Pages: `https://ehassan256417-afk.github.io`). Keep `ALLOW_NO_ORIGIN` off.
-- [ ] **Data handling.** Student text is sent to the AI provider. Check the provider's terms for the free tier (data may be used to improve their products) and tell students before they upload.
+- [ ] **Data handling.** Student text is sent to the AI provider. ZRO's pricing page states zero request retention and no training on requests for every plan; read its privacy terms yourself and tell students before they upload.
 - [ ] **Course material rights.** Students should only upload material they are allowed to use.
 - [ ] **Logging.** The server logs method, path, status and timing only. Keep it that way on the host.
 - [ ] **HTTPS and secrets.** Serve over HTTPS and store the key in the host's secret manager, not in the repo.
-- [ ] **No billing.** Keep the Google project on the free tier with billing disabled.
-- [ ] **Real-model test.** Run the pipeline against Gemini with a few real chapters and read the results critically.
+- [ ] **Spend limits.** Give the ZRO key a spend quota and an expiry date, and set `DAILY_GENERATION_CAP` to match.
+- [ ] **Real-model test.** Run the pipeline against ZRO with a few real chapters and read the results critically.
 
 After that, build the frontend with `NEXT_PUBLIC_LESSON_API_URL` set to the backend's URL.
 
