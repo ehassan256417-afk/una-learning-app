@@ -27,6 +27,12 @@ const app = createApp({
   allowNoOrigin: env.ALLOW_NO_ORIGIN === 'true',
   rateLimit: { max: Number(env.RATE_LIMIT_MAX) || 6, windowMs: 10 * 60_000 },
   dailyGenerationCap: Number(env.DAILY_GENERATION_CAP) || 200,
+  courseBudget: {
+    maxRequests: Number(env.COURSE_MAX_REQUESTS) || 12,
+    maxTokens: Number(env.COURSE_MAX_TOKENS) || 120_000,
+  },
+  planMaxTokens: Number(env.PLAN_MAX_TOKENS) || undefined,
+  lessonMaxTokens: Number(env.LESSON_MAX_TOKENS) || undefined,
   log: (line) => console.log(`[lessons] ${line}`),
 });
 

@@ -11,7 +11,7 @@ import type {
   Section,
   SourceCitation,
 } from '../lib/learning/types.ts';
-import { PageIndex, verifyItem, type RawCitation } from '../lib/learning/verify.ts';
+import { normalizeText, PageIndex, verifyItem, type RawCitation } from '../lib/learning/verify.ts';
 import { documentIdFor } from '../lib/pdf/extract.ts';
 import { buildPrompt, fitPagesToBudget, SYSTEM_PROMPT } from './prompt.ts';
 import type { AiProvider } from './providers/types.ts';
@@ -36,7 +36,7 @@ export interface SourceDocument {
 }
 
 const LEVEL_ORDER: Difficulty[] = ['Beginner', 'Intermediate', 'Advanced'];
-const XP_REWARD: Record<Difficulty, number> = { Beginner: 30, Intermediate: 40, Advanced: 50 };
+export const XP_REWARD: Record<Difficulty, number> = { Beginner: 30, Intermediate: 40, Advanced: 50 };
 const MIN_NOTES = 1;
 const MIN_QUESTIONS = 2;
 
@@ -86,10 +86,21 @@ export function placeAnswer(
   return { choices: out, answerIndex: target };
 }
 
-interface Tally {
+export interface Tally {
   checked: number;
   kept: number;
   reasons: string[];
+}
+
+/** Extra behaviour for adaptive lessons. The single-request course uses none of it. */
+export interface SectionOptions {
+  /** Section id to use instead of the level name. */
+  id?: string;
+  /** Concept ids items may be tagged with; any other tag is dropped. */
+  conceptIds?: string[];
+  /** Drop questions whose prompt already contains the correct answer. */
+  rejectCircular?: boolean;
+  pages?: number[];
 }
 
 /** Runs the grounding check for one item and records the outcome. */
@@ -111,16 +122,39 @@ function check(
   return null;
 }
 
-function buildSection(raw: RawSection, index: PageIndex, documentId: string, tally: Tally): Section | null {
-  const id = raw.level.toLowerCase();
+export function buildSection(
+  raw: RawSection,
+  index: PageIndex,
+  documentId: string,
+  tally: Tally,
+  options: SectionOptions = {},
+): Section | null {
+  const id = options.id ?? raw.level.toLowerCase();
   const pdf = (citations: SourceCitation[]): Provenance => ({ kind: 'pdf', documentId, citations });
+  const concept = (ref: string | undefined) => (ref && options.conceptIds?.includes(ref) ? ref : undefined);
 
   const notes: NoteCard[] = [];
   raw.notes.forEach((n, i) => {
     const citations = check('note', n.body, n.citations, index, documentId, tally);
     if (!citations) return;
     const keyTerm = n.keyTerm && n.body.toLowerCase().includes(n.keyTerm.toLowerCase()) ? n.keyTerm : undefined;
-    notes.push({ id: `${id}-n${i + 1}`, title: n.title, body: n.body, keyTerm, provenance: pdf(citations) });
+    // A code or worked example is shown only if it appears on a cited page; it is never invented.
+    const sample = n.example?.trim();
+    const sampleNorm = sample ? normalizeText(sample) : '';
+    const example =
+      sample && sampleNorm.length >= 6 && citations.some((c) => index.get(c.page)?.norm.includes(sampleNorm))
+        ? sample
+        : undefined;
+    notes.push({
+      id: `${id}-n${i + 1}`,
+      title: n.title,
+      body: n.body,
+      keyTerm,
+      ...(example ? { example } : {}),
+      ...(n.aspect ? { aspect: n.aspect } : {}),
+      ...(concept(n.conceptId) ? { conceptId: concept(n.conceptId) } : {}),
+      provenance: pdf(citations),
+    });
   });
 
   // Answer positions are seeded from the document and section, so the same PDF
@@ -131,6 +165,14 @@ function buildSection(raw: RawSection, index: PageIndex, documentId: string, tal
   const questions: QuizQuestion[] = [];
   raw.questions.forEach((q, i) => {
     const claim = `${q.choices[q.answerIndex]} ${q.explanation}`;
+    if (options.rejectCircular) {
+      const answer = normalizeText(q.choices[q.answerIndex]);
+      if (answer.length >= 4 && ` ${normalizeText(q.prompt)} `.includes(` ${answer} `)) {
+        tally.checked++;
+        if (tally.reasons.length < 8) tally.reasons.push('question: the question already contains its answer');
+        return;
+      }
+    }
     const citations = check('question', claim, q.citations, index, documentId, tally);
     if (!citations) return;
     const level = q.level as LearningLevel;
@@ -138,6 +180,7 @@ function buildSection(raw: RawSection, index: PageIndex, documentId: string, tal
     const placed = placeAnswer(q.choices, q.answerIndex, slots.shift()!, random);
     questions.push({
       id: `${id}-q${i + 1}`,
+      ...(concept(q.conceptId) ? { conceptId: concept(q.conceptId) } : {}),
       level,
       prompt: q.prompt,
       choices: placed.choices,
@@ -184,6 +227,8 @@ function buildSection(raw: RawSection, index: PageIndex, documentId: string, tal
     questions: questions.sort((a, b) => a.level - b.level),
     flashcards,
     provenance: pdf(sectionCitations),
+    ...(options.conceptIds ? { conceptIds: options.conceptIds } : {}),
+    ...(options.pages ? { pages: options.pages } : {}),
   };
   // Structural safety net: every kept item must carry a usable citation.
   return validateSectionGrounding(section).length === 0 ? section : null;

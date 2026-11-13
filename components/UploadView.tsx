@@ -17,8 +17,10 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
-import { checkBackend, LESSON_API_URL, LessonApiError, requestLessons } from '@/lib/learning/api';
+import { generateAdaptiveCourse, unfinishedLessons } from '@/lib/learning/adaptive';
+import { checkBackend, LESSON_API_URL, LessonApiError, requestLesson, requestPlan } from '@/lib/learning/api';
 import type { ExtractedDocument, HealthResponse } from '@/lib/learning/contracts';
+import { summarizeCoverage } from '@/lib/learning/coverage';
 import { findGeneratedByDocument, saveGeneratedCourse } from '@/lib/learning/generated-store';
 import { coursePath } from '@/lib/learning/links';
 import type { Course } from '@/lib/learning/types';
@@ -30,7 +32,7 @@ import { AppHeader } from './AppHeader';
 
 const PIPELINE = [
   { icon: FileSearch, title: 'Read the PDF on your device', body: 'Text is extracted page by page in your browser. The file itself is never uploaded.' },
-  { icon: BookOpenCheck, title: 'Build three levels', body: 'Beginner, Intermediate and Advanced lessons with notes, questions and flashcards.' },
+  { icon: BookOpenCheck, title: 'Plan lessons from the concepts', body: 'The concepts in your PDF decide how many lessons there are and their order. Each lesson is Beginner, Intermediate or Advanced.' },
   { icon: Quote, title: 'Cite every item', body: 'Each note and question carries the page number and the quote it is based on.' },
   { icon: ShieldCheck, title: 'Check against your PDF', body: 'Items whose quotes cannot be found in your PDF are removed. This lowers errors; it cannot rule them out.' },
 ];
@@ -41,8 +43,10 @@ type Phase =
   | { step: 'idle' }
   | { step: 'reading'; page: number; total: number }
   | { step: 'ready' }
-  | { step: 'generating' }
-  | { step: 'done'; course: Course; reused: 'saved' | 'server' | null };
+  | { step: 'generating'; title: string; detail: string }
+  | { step: 'done'; course: Course; reused: 'saved' | null };
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export function UploadView() {
   const { markPdfSelected } = useProgress();
@@ -53,6 +57,10 @@ export function UploadView() {
   const [phase, setPhase] = useState<Phase>({ step: 'idle' });
   const [error, setError] = useState('');
   const job = useRef(0);
+  const stopper = useRef<AbortController | null>(null);
+
+  // Stop any generation still running when the student leaves this page.
+  useEffect(() => () => stopper.current?.abort(), []);
 
   useEffect(() => {
     if (!LESSON_API_URL) return;
@@ -65,6 +73,7 @@ export function UploadView() {
 
   const reset = () => {
     job.current++;
+    stopper.current?.abort();
     setFile(null);
     setDoc(null);
     setError('');
@@ -107,31 +116,72 @@ export function UploadView() {
     }
   };
 
-  const generate = async () => {
+  /**
+   * Plans the course, then generates one lesson per request. The course is
+   * saved after every lesson, so whatever was generated survives a failure.
+   * With `resume`, the saved plan is reused and only missing lessons are requested.
+   */
+  const generate = async (resume?: Course) => {
     if (!doc) return;
     const id = ++job.current;
     setError('');
-    setPhase({ step: 'generating' });
+    setPhase({
+      step: 'generating',
+      title: resume ? 'Continuing your course…' : 'Planning your lessons…',
+      detail: resume ? 'Picking up where generation stopped.' : 'Finding the concepts in your PDF and how they build on each other.',
+    });
+    // Leaving the page or removing the file stops further requests.
+    stopper.current?.abort();
+    const controller = new AbortController();
+    stopper.current = controller;
+    // Lessons saved earlier for this PDF stay in place until a new lesson exists to replace them.
+    const previous = findGeneratedByDocument(doc.id);
     try {
-      const { course, cached } = await requestLessons(doc);
+      const result = await generateAdaptiveCourse({
+        doc,
+        api: { plan: requestPlan, lesson: requestLesson },
+        resume,
+        save: saveGeneratedCourse,
+        deferFirstSave: !!previous && previous.sections.length > 0,
+        signal: controller.signal,
+        onProgress: (p) => {
+          if (job.current !== id || p.stage !== 'lesson') return;
+          setPhase({ step: 'generating', title: `Writing lesson ${p.index + 1} of ${p.total}`, detail: p.title });
+        },
+      });
       if (job.current !== id) return;
-      if (!saveGeneratedCourse(course)) {
-        setError('The lessons were created but this browser has no space to save them. Remove an older PDF course and try again.');
-        setPhase({ step: 'ready' });
-        return;
+      if (result.stopped) {
+        setError(result.stopped.message);
+        if (result.stopped.code === 'network') setBackend({ state: 'down' });
       }
-      setPhase({ step: 'done', course, reused: cached ? 'server' : null });
+      // Show what is actually saved: if nothing new was generated, that is still the earlier course.
+      const saved = findGeneratedByDocument(doc.id);
+      const shown = result.course.sections.length === 0 && saved && saved.sections.length > 0 ? saved : result.course;
+      setPhase({ step: 'done', course: shown, reused: shown === saved && shown !== result.course ? 'saved' : null });
     } catch (err) {
       if (job.current !== id) return;
-      setPhase({ step: 'ready' });
       setError(err instanceof LessonApiError ? err.message : 'Something went wrong while creating the lessons.');
       if (err instanceof LessonApiError && err.code === 'network') setBackend({ state: 'down' });
+      // Anything already saved for this PDF is still there; show it instead of starting over.
+      const saved = findGeneratedByDocument(doc.id);
+      setPhase(saved ? { step: 'done', course: saved, reused: 'saved' } : { step: 'ready' });
     }
   };
 
   const busy = phase.step === 'reading' || phase.step === 'generating';
   const canGenerate = backend.state === 'up';
-  const report = phase.step === 'done' ? phase.course.generation?.report : undefined;
+  const done = phase.step === 'done' ? phase.course : undefined;
+  const report = done?.generation?.report;
+  const planned = done?.plan?.lessons.length ?? 0;
+  const remaining = done ? unfinishedLessons(done) : 0;
+  const coverage = done?.coverage ? summarizeCoverage(done.coverage) : undefined;
+  const levels = done
+    ? (['Beginner', 'Intermediate', 'Advanced'] as const)
+        .map((level) => ({ level, n: done.sections.filter((s) => s.difficulty === level).length }))
+        .filter((x) => x.n > 0)
+        .map((x) => `${x.n} ${x.level}`)
+        .join(', ')
+    : '';
 
   return (
     <main className="screen with-nav">
@@ -241,9 +291,13 @@ export function UploadView() {
               {doc.pages[0].text.length > 220 && '…'}
             </p>
             {doc.truncated && <p className="muted">This PDF is long, so only the first part of its text will be used.</p>}
-            <button type="button" className="btn btn-gold btn-xl gap-top" onClick={generate} disabled={!canGenerate}>
+            <button type="button" className="btn btn-gold btn-xl gap-top" onClick={() => void generate()} disabled={!canGenerate}>
               <Sparkles size={20} /> Generate lessons
             </button>
+            <p className="muted">
+              One request plans the lessons from the concepts in your PDF, then each lesson is written with its own
+              request. Longer PDFs take more requests and more time.
+            </p>
             {!canGenerate && <p className="muted">Generating needs the lesson service, which is not available right now.</p>}
           </div>
         )}
@@ -252,41 +306,72 @@ export function UploadView() {
           <div className="card statuscard" role="status" aria-live="polite">
             <span className="spinner" aria-hidden="true" />
             <div>
-              <b>Building your lessons…</b>
-              <small>Writing three levels and checking each item against your PDF. This can take up to a minute.</small>
+              <b>{phase.title}</b>
+              <small>
+                {phase.detail} Each lesson is checked against your PDF and saved as soon as it is ready. Keep this
+                page open.
+              </small>
             </div>
           </div>
         )}
 
-        {phase.step === 'done' && (
+        {phase.step === 'done' && done && (
           <div className="card resultcard">
             <h2>
-              <CheckCircle2 size={22} className="c-green" /> {phase.reused === 'saved' ? 'Lessons already saved' : 'Lessons ready'}
+              <CheckCircle2 size={22} className="c-green" />{' '}
+              {phase.reused === 'saved'
+                ? 'Lessons already saved'
+                : remaining > 0
+                  ? `${done.sections.length} of ${planned} lessons ready`
+                  : 'Lessons ready'}
             </h2>
             <p>
-              <b>{phase.course.title}</b> • {phase.course.sections.length} level
-              {phase.course.sections.length === 1 ? '' : 's'}: {phase.course.sections.map((s) => s.difficulty).join(', ')}
+              <b>{done.title}</b> • {plural(done.sections.length, 'lesson')}
+              {levels && `: ${levels}`}
             </p>
-            {report && (
+            {coverage && (
+              <p className="muted">
+                {coverage.covered} of {plural(coverage.concepts, 'concept')} from the plan {coverage.covered === 1 ? 'has' : 'have'}{' '}
+                both an explanation and a practice question. {coverage.pagesTaught} of{' '}
+                {plural(coverage.pagesWithText, 'page')} with text {coverage.pagesTaught === 1 ? 'is' : 'are'} cited
+                {coverage.pagesOmitted.length > 0 && `; no lesson uses page${coverage.pagesOmitted.length === 1 ? '' : 's'} ${coverage.pagesOmitted.join(', ')}`}
+                . The learning path lists anything that was left out.
+              </p>
+            )}
+            {report && report.checked > 0 && (
               <p className="muted">
                 {report.kept} of {report.checked} generated items matched your PDF
                 {report.dropped > 0 && `; ${report.dropped} were removed`}. This automated check reduces mistakes but
                 does not guarantee accuracy.
               </p>
             )}
-            {phase.reused && (
+            {done.budget && (
               <p className="muted">
-                {phase.reused === 'saved'
-                  ? 'These were generated earlier on this device, so no new AI request was made.'
-                  : 'The lesson service reused an earlier result, so no new AI request was made.'}
+                AI requests used for this course: {done.budget.requests} of {done.budget.maxRequests}.
               </p>
             )}
-            <Link href={coursePath(phase.course)} className="btn btn-gold btn-xl gap-top">
-              Open learning path <ArrowRight size={20} />
-            </Link>
-            {phase.reused === 'saved' && canGenerate && (
-              <button type="button" className="textlink center" onClick={generate}>
-                <RotateCcw size={16} /> Generate again
+            {phase.reused === 'saved' && (
+              <p className="muted">These were generated earlier on this device, so no new AI request was made.</p>
+            )}
+            {done.sections.length > 0 && (
+              <Link href={coursePath(done)} className="btn btn-gold btn-xl gap-top">
+                Open learning path <ArrowRight size={20} />
+              </Link>
+            )}
+            {remaining > 0 && canGenerate && (
+              <>
+                <button type="button" className="btn btn-outline btn-xl gap-top" onClick={() => void generate(done)}>
+                  <Sparkles size={20} /> Generate the remaining {plural(remaining, 'lesson')}
+                </button>
+                <p className="muted">
+                  This makes up to {plural(remaining, 'new AI request')}. Lessons that are already saved are not
+                  generated again.
+                </p>
+              </>
+            )}
+            {remaining === 0 && phase.reused === 'saved' && canGenerate && (
+              <button type="button" className="textlink center" onClick={() => void generate()}>
+                <RotateCcw size={16} /> Plan and generate again (new AI requests)
               </button>
             )}
           </div>

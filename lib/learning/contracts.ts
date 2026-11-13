@@ -1,4 +1,4 @@
-import type { Course } from './types.ts';
+import type { BudgetUse, Course, GroundingReport, LessonPlan, PlanConcept, PlannedLesson, Section } from './types.ts';
 
 /**
  * Shapes shared by the static frontend and the lesson backend.
@@ -42,7 +42,42 @@ export interface GenerateResponse {
   cached: boolean;
 }
 
+/** Stage 1 of adaptive generation: one AI request that returns a verified lesson plan. */
+export interface PlanRequest {
+  document: { name: string; pageCount: number; pages: ExtractedPage[] };
+}
+
+export interface PlanResponse {
+  /** SHA-256 of the extracted text, computed by the backend. */
+  documentId: string;
+  plan: LessonPlan;
+  provider: string;
+  model: string;
+  cached: boolean;
+  budget: BudgetUse;
+}
+
+/** Stage 2: one AI request per planned lesson, sent only the pages that lesson needs. */
+export interface LessonGenerateRequest {
+  documentId: string;
+  documentName: string;
+  lesson: PlannedLesson;
+  /** The planned concepts this lesson teaches, with their evidence quotes. */
+  concepts: PlanConcept[];
+  pages: ExtractedPage[];
+  /** Names of concepts taught in earlier lessons, so they are not explained again. */
+  taught?: string[];
+}
+
+export interface LessonGenerateResponse {
+  section: Section;
+  report: GroundingReport;
+  cached: boolean;
+  budget: BudgetUse;
+}
+
 export type ApiErrorCode =
+  | 'budget_exhausted'
   | 'invalid_request'
   | 'too_large'
   | 'forbidden_origin'

@@ -39,11 +39,17 @@ export const DEFAULT_ZRO_REASONING_EFFORT: ZroReasoningEffort = 'none';
 export const DEFAULT_ZRO_MAX_TOKENS = 32_000;
 const REASONING_LEVELS: readonly string[] = ['none', 'low', 'high', 'max'];
 
+interface RawUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+}
+
 interface ChatCompletionResponse {
   choices?: Array<{
     finish_reason?: string;
     message?: { content?: string | null };
   }>;
+  usage?: RawUsage;
 }
 
 interface ChatCompletionChunk {
@@ -51,12 +57,14 @@ interface ChatCompletionChunk {
     finish_reason?: string | null;
     delta?: { content?: string | null };
   }>;
+  usage?: RawUsage | null;
   error?: unknown;
 }
 
 interface Completion {
   text: string;
   finishReason?: string;
+  usage?: RawUsage;
 }
 
 /**
@@ -70,6 +78,7 @@ async function readStream(body: ReadableStream<Uint8Array>): Promise<Completion>
   let buffer = '';
   let text = '';
   let finishReason: string | undefined;
+  let usage: RawUsage | undefined;
   let done = false;
 
   const handle = (line: string) => {
@@ -90,6 +99,7 @@ async function readStream(body: ReadableStream<Uint8Array>): Promise<Completion>
     const choice = chunk.choices?.[0];
     if (typeof choice?.delta?.content === 'string') text += choice.delta.content;
     if (choice?.finish_reason) finishReason = choice.finish_reason;
+    if (chunk.usage) usage = chunk.usage;
   };
 
   for (;;) {
@@ -107,7 +117,7 @@ async function readStream(body: ReadableStream<Uint8Array>): Promise<Completion>
   if (!finishReason && !done) {
     throw new ProviderError('failed', 'The AI response ended before it was complete. Try again.');
   }
-  return { text, finishReason };
+  return { text, finishReason, usage };
 }
 
 export class ZroProvider implements AiProvider {
@@ -174,7 +184,7 @@ export class ZroProvider implements AiProvider {
           { role: 'user', content: request.prompt },
         ],
         temperature: 0.2,
-        max_tokens: this.maxTokens,
+        max_tokens: request.maxTokens ? Math.min(request.maxTokens, this.maxTokens) : this.maxTokens,
         reasoning_effort: this.reasoningEffort,
         response_format: { type: 'json_object' },
         stream: true,
@@ -201,6 +211,19 @@ export class ZroProvider implements AiProvider {
     }
 
     const completion = await this.#readCompletion(response);
+    // Reported before the answer is judged, so a rejected answer still counts against the budget.
+    if (request.onUsage) {
+      const reported = completion.usage;
+      request.onUsage(
+        typeof reported?.prompt_tokens === 'number' && typeof reported.completion_tokens === 'number'
+          ? { promptTokens: reported.prompt_tokens, outputTokens: reported.completion_tokens }
+          : {
+              promptTokens: Math.ceil((request.system.length + request.prompt.length) / 4),
+              outputTokens: Math.ceil(completion.text.length / 4),
+              estimated: true,
+            },
+      );
+    }
     if (completion.finishReason === 'length') {
       // No text at all means the allowance went on reasoning before the lesson
       // started: lower ZRO_REASONING_EFFORT or raise ZRO_MAX_TOKENS.
@@ -226,6 +249,7 @@ export class ZroProvider implements AiProvider {
       return {
         text: typeof choice?.message?.content === 'string' ? choice.message.content : '',
         finishReason: choice?.finish_reason,
+        usage: data?.usage,
       };
     }
     return readStream(response.body);

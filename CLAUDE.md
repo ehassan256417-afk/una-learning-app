@@ -8,12 +8,12 @@ Mobile-first study app: course PDF -> short lessons, quizzes, flashcards. Next.j
 npm ci
 npm run dev      # frontend, http://localhost:3000
 npm run server   # lesson backend, http://127.0.0.1:8787 (offline sample mode without a key)
-npm test         # 79 tests, Node built-in runner
+npm test         # 109 tests, Node built-in runner
 npm run lint     # tsc --noEmit
 npm run build
 ```
 
-Node 24+. The test files contain 75 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 79. `node scripts/validate-provider.ts` makes real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
+Node 24+. The test files contain 105 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 109. `node scripts/validate-provider.ts` makes real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
 
 ## Guardrails
 
@@ -21,6 +21,7 @@ Node 24+. The test files contain 75 `it(...)` calls; two of them sit inside `for
 - Never commit `.env*` or `*.pdf`. No API key, provider URL or backend address in frontend code.
 - The PDF file never leaves the browser; only `{ page, text }` goes to the backend.
 - Grounding checks (`lib/learning/verify.ts`, `lib/learning/grounding.ts`) and request guards (`server/security.ts`) are the trust boundary. Changes there need tests first and a security review.
+- Lesson generation is adaptive: `server/plan.ts` (one planning request, verified by fixed rules), `server/lesson.ts` (one request per lesson), `lib/learning/coverage.ts` and the browser driver `lib/learning/adaptive.ts`. Never add an automatic retry of an AI request, and keep every request inside the per-course budget (`server/budget.ts`).
 - Phases 1 and 2 are done. Do not rebuild or restructure finished work. ZRO (`server/providers/zro.ts`) is the primary AI provider; Gemini is kept as an optional alternative. Open items: real ZRO run, auth, shared rate-limit store, backend hosting (README "Before deploying the backend").
 - `.claude/` is git-ignored, so shared agent configuration lives in this file. Do not add project agents or change global settings; reuse what is installed.
 

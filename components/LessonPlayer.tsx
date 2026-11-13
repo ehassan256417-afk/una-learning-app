@@ -27,6 +27,8 @@ import { DemoTag, ProgressBar, RichText, SourceLine } from './ui';
 type Stage = 'notes' | 'quiz' | 'cards' | 'done';
 const LEVELS: LearningLevel[] = [1, 2, 3];
 const LEVEL_ICONS = { 1: BookOpen, 2: Layers, 3: Trophy } as const;
+/** Adaptive lessons label each note with the part of the explanation it gives. */
+const ASPECT_LABELS = { what: 'What it is', why: 'Why it matters', how: 'How it works', example: 'Example' } as const;
 
 export function LessonPlayer({ course, section, index }: { course: Course; section: Section; index: number }) {
   const { state, ready, completeSection } = useProgress();
@@ -199,6 +201,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
           <article className="card notecard">
             <small className="stepcount">
               Concept {noteIdx + 1} of {section.notes.length}
+              {note.aspect && ` • ${ASPECT_LABELS[note.aspect]}`}
             </small>
             <h1>{note.title}</h1>
             <p>

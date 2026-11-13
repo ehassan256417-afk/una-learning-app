@@ -39,6 +39,94 @@ export interface GenerationInfo {
   report: GroundingReport;
 }
 
+/** A concept found in the PDF during planning, with the quotes that prove it is there. */
+export interface PlanConcept {
+  id: string;
+  name: string;
+  /** One sentence saying what the concept is, from the PDF. */
+  summary: string;
+  difficulty: Difficulty;
+  /** Core concepts must be taught; supporting ones are taught when the budget allows. */
+  importance: 'core' | 'supporting';
+  /** Pages the concept appears on (confirmed by its evidence quotes). */
+  pages: number[];
+  /** Ids of other concepts in the same plan that should be learned first. */
+  prerequisites: string[];
+  evidence: SourceCitation[];
+}
+
+/** One lesson in the adaptive plan. It becomes a `Section` once generated. */
+export interface PlannedLesson {
+  id: string;
+  title: string;
+  difficulty: Difficulty;
+  conceptIds: string[];
+  objectives: string[];
+  pages: number[];
+}
+
+/** Something the planner proposed that was left out, and why. */
+export interface FlaggedItem {
+  name: string;
+  reason: string;
+  pages: number[];
+}
+
+export interface LessonPlan {
+  version: 1;
+  title: string;
+  concepts: PlanConcept[];
+  lessons: PlannedLesson[];
+  flagged: FlaggedItem[];
+  /** Amount of text on each page, kept so coverage can be recalculated without the PDF. */
+  pageChars: Array<{ page: number; chars: number }>;
+}
+
+export interface LessonState {
+  lessonId: string;
+  status: 'pending' | 'ready' | 'failed';
+  /** Why a lesson failed, in words a student can read. */
+  reason?: string;
+}
+
+export interface ConceptCoverage {
+  conceptId: string;
+  name: string;
+  importance: PlanConcept['importance'];
+  pages: number[];
+  /** covered: explained and practised. partial: only one of the two. missing: neither. pending: lesson not generated. */
+  status: 'covered' | 'partial' | 'missing' | 'pending';
+  lessonId?: string;
+}
+
+export interface PageCoverage {
+  page: number;
+  chars: number;
+  /** taught: a kept item cites it. planned: in a concept but not cited yet. sparse: almost no text. omitted: text no lesson uses. */
+  status: 'taught' | 'planned' | 'sparse' | 'omitted';
+}
+
+/**
+ * Result of the automated coverage check. It compares the plan with what was
+ * generated; it cannot tell whether the plan itself missed something subtle.
+ */
+export interface CoverageReport {
+  concepts: ConceptCoverage[];
+  pages: PageCoverage[];
+  /** Plain-language list of what was left out or is still missing. */
+  omissions: string[];
+}
+
+export interface BudgetUse {
+  requests: number;
+  maxRequests: number;
+  tokens: number;
+  maxTokens: number;
+}
+
+/** Which part of the explanation a note gives. */
+export type NoteAspect = 'what' | 'why' | 'how' | 'example';
+
 export type Provenance =
   | { kind: 'demo' }
   | { kind: 'pdf'; documentId: string; citations: SourceCitation[] };
@@ -62,11 +150,16 @@ export interface NoteCard {
   keyTerm?: string;
   /** Optional command / code sample shown in a terminal block. */
   example?: string;
+  /** Adaptive lessons: which part of the explanation this is, and the concept it teaches. */
+  aspect?: NoteAspect;
+  conceptId?: string;
   provenance: Provenance;
 }
 
 export interface QuizQuestion {
   id: string;
+  /** Adaptive lessons: the concept this question practises. */
+  conceptId?: string;
   level: LearningLevel;
   prompt: string;
   choices: string[];
@@ -96,6 +189,9 @@ export interface Section {
   questions: QuizQuestion[];
   flashcards: Flashcard[];
   provenance: Provenance;
+  /** Adaptive lessons: the planned concepts this lesson teaches and the pages it draws on. */
+  conceptIds?: string[];
+  pages?: number[];
 }
 
 export interface Course {
@@ -112,6 +208,11 @@ export interface Course {
   provenance: Provenance;
   /** Present on courses generated from an uploaded PDF. */
   generation?: GenerationInfo;
+  /** Present on adaptively generated courses. `sections` holds only the lessons generated so far. */
+  plan?: LessonPlan;
+  lessonStates?: LessonState[];
+  coverage?: CoverageReport;
+  budget?: BudgetUse;
 }
 
 /** Lightweight course listing (no lesson bodies). */

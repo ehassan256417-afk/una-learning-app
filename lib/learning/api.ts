@@ -5,6 +5,10 @@ import type {
   GenerateRequest,
   GenerateResponse,
   HealthResponse,
+  LessonGenerateRequest,
+  LessonGenerateResponse,
+  PlanRequest,
+  PlanResponse,
 } from './contracts.ts';
 
 /**
@@ -41,6 +45,54 @@ export async function checkBackend(signal?: AbortSignal): Promise<HealthResponse
     return null;
   }
 }
+
+async function post<T>(path: string, payload: unknown, isValid: (body: unknown) => boolean, signal?: AbortSignal): Promise<T> {
+  if (!LESSON_API_URL) {
+    throw new LessonApiError('not_connected', 'Lesson generation is not connected on this site yet.');
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${LESSON_API_URL}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal,
+    });
+  } catch {
+    throw new LessonApiError('network', 'Could not reach the lesson service. Check that it is running and try again.');
+  }
+  const body = (await res.json().catch(() => null)) as unknown;
+  if (!res.ok) {
+    const error = body && typeof body === 'object' && 'error' in body ? (body as ApiErrorBody).error : null;
+    throw new LessonApiError(error?.code ?? 'bad_response', error?.message ?? `The lesson service returned an error (${res.status}).`);
+  }
+  if (!isValid(body)) throw new LessonApiError('bad_response', 'The lesson service sent an unexpected response.');
+  return body as T;
+}
+
+/** Adaptive stage 1: asks for a lesson plan (one AI request). */
+export const requestPlan = (doc: ExtractedDocument, signal?: AbortSignal): Promise<PlanResponse> =>
+  post<PlanResponse>(
+    '/api/lessons/plan',
+    { document: { name: doc.name, pageCount: doc.pageCount, pages: doc.pages } } satisfies PlanRequest,
+    (b) => {
+      const r = b as PlanResponse | null;
+      return !!r && typeof r.documentId === 'string' && Array.isArray(r.plan?.lessons) && Array.isArray(r.plan?.concepts);
+    },
+    signal,
+  );
+
+/** Adaptive stage 2: asks for one planned lesson (one AI request). */
+export const requestLesson = (body: LessonGenerateRequest, signal?: AbortSignal): Promise<LessonGenerateResponse> =>
+  post<LessonGenerateResponse>(
+    '/api/lessons/lesson',
+    body,
+    (b) => {
+      const r = b as LessonGenerateResponse | null;
+      return !!r && typeof r.section?.id === 'string' && Array.isArray(r.section.notes) && Array.isArray(r.section.questions);
+    },
+    signal,
+  );
 
 export async function requestLessons(doc: ExtractedDocument, signal?: AbortSignal): Promise<GenerateResponse> {
   if (!LESSON_API_URL) {

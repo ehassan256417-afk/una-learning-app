@@ -9,13 +9,10 @@ import { DEMO_COMPLETED_SECTIONS, DEMO_STARTING_STREAK, DEMO_STARTING_XP } from 
  * exist, replace the load/save pair with API calls; the hook API can stay.
  */
 
-export interface SectionResult {
-  score: number;
-  total: number;
-  xp: number;
-  /** True for the seeded sample history. */
-  demo?: boolean;
-}
+import type { SectionResult } from './status';
+
+export { courseProgress, sectionKey, sectionStatuses } from './status';
+export type { SectionResult, SectionStatus } from './status';
 
 export interface ProgressState {
   version: 1;
@@ -43,29 +40,6 @@ export function levelFor(xp: number) {
     toNext: XP_PER_LEVEL - into,
     pct: Math.round((into / XP_PER_LEVEL) * 100),
   };
-}
-
-export const sectionKey = (courseId: string, sectionId: string) => `${courseId}/${sectionId}`;
-
-export type SectionStatus = 'done' | 'active' | 'locked';
-
-/** Sections unlock in order: the first unfinished one is active. */
-export function sectionStatuses(courseId: string, sectionIds: string[], state: ProgressState): SectionStatus[] {
-  let activeGiven = false;
-  return sectionIds.map((id) => {
-    if (state.completed[sectionKey(courseId, id)]) return 'done';
-    if (!activeGiven) {
-      activeGiven = true;
-      return 'active';
-    }
-    return 'locked';
-  });
-}
-
-export function courseProgress(courseId: string, sectionIds: string[], state: ProgressState) {
-  const done = sectionIds.filter((id) => state.completed[sectionKey(courseId, id)]).length;
-  const total = sectionIds.length;
-  return { done, total, pct: total ? Math.round((done / total) * 100) : 0 };
 }
 
 export function initialsOf(name: string) {

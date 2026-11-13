@@ -1,5 +1,6 @@
 import type { ExtractedPage } from '../../lib/learning/contracts.ts';
 import { contentWords } from '../../lib/learning/verify.ts';
+import type { PlanConcept } from '../../lib/learning/types.ts';
 import type { AiProvider, LessonRequest } from './types.ts';
 
 /**
@@ -40,11 +41,112 @@ function targetWord(sentence: string): string | null {
   return usable.reduce((a, b) => (b.length > a.length ? b : a));
 }
 
+const vocabularyOf = (sentences: Sentence[]) => [
+  ...new Set(sentences.flatMap((s) => s.text.match(/[A-Za-z]{6,}/g) ?? []).map((w) => w.toLowerCase())),
+];
+
+/** A fill-in-the-blank question built from one sentence, or null if it has no usable word. */
+function cloze(s: Sentence, vocabulary: string[], level: number, conceptId?: string) {
+  const word = targetWord(s.text);
+  if (!word) return null;
+  const others = vocabulary.filter((w) => w !== word.toLowerCase());
+  const start = others.length ? hash(s.text) % others.length : 0;
+  const choices = [...new Set([0, 1, 2].map((k) => others[(start + k * 7) % Math.max(1, others.length)] ?? `option ${k + 1}`))];
+  while (choices.length < 3) choices.push(`none of these (${choices.length + 1})`);
+  const answerIndex = hash(word + s.page) % 4;
+  choices.splice(answerIndex, 0, word.toLowerCase());
+  return {
+    ...(conceptId ? { conceptId } : {}),
+    level,
+    prompt: `Fill in the blank from page ${s.page}: "${s.text.replace(word, '_____')}"`,
+    choices,
+    answerIndex,
+    explanation: `Page ${s.page} says: "${s.text}"`,
+    citations: [{ page: s.page, quote: s.text }],
+  };
+}
+
+const firstWords = (text: string, n: number) => cap(text.split(/\s+/).slice(0, n).join(' ').replace(/[,;:.]+$/, ''));
+
+/** Offline stand-in for the planning request: one concept per page that has text, grouped a few per lesson. */
+function mockPlan(pages: ExtractedPage[], maxLessons: number): string {
+  const byPage = pages
+    .map((p) => ({ page: p.page, sentences: splitSentences([p]) }))
+    .filter((p) => p.sentences.length >= 2);
+  const levelAt = (i: number) => LEVELS[Math.min(2, Math.floor((i * 3) / Math.max(1, byPage.length)))];
+  const concepts = byPage.map((p, i) => ({
+    id: `m${i + 1}`,
+    name: firstWords(p.sentences[0].text, 5),
+    summary: p.sentences[0].text,
+    difficulty: levelAt(i),
+    importance: 'core',
+    pages: [p.page],
+    prerequisites: i > 0 ? [`m${i}`] : [],
+    evidence: [{ page: p.page, quote: p.sentences[0].text }],
+  }));
+  const size = Math.min(4, Math.max(2, Math.ceil(concepts.length / Math.max(1, maxLessons))));
+  const lessons = [];
+  for (let i = 0; i < concepts.length; i += size) {
+    const group = concepts.slice(i, i + size);
+    lessons.push({
+      title: `${group[0].name}…`,
+      difficulty: group[0].difficulty,
+      conceptIds: group.map((c) => c.id),
+      objectives: [],
+    });
+  }
+  return JSON.stringify({ title: '', concepts, lessons });
+}
+
+/** Offline stand-in for one lesson request: copies sentences from the concept's pages and blanks out words. */
+function mockLesson(pages: ExtractedPage[], concepts: PlanConcept[]): string {
+  const all = splitSentences(pages);
+  const vocabulary = vocabularyOf(all);
+  const notes = [];
+  const questions = [];
+  const flashcards = [];
+  for (const c of concepts) {
+    const own = all.filter((s) => c.pages.includes(s.page));
+    if (own.length === 0) continue;
+    const cite = (s: Sentence) => [{ page: s.page, quote: s.text }];
+    notes.push({ conceptId: c.id, aspect: 'what', title: c.name, body: own[0].text, keyTerm: targetWord(own[0].text) ?? undefined, citations: cite(own[0]) });
+    if (own[2]) notes.push({ conceptId: c.id, aspect: 'how', title: `${firstWords(own[2].text, 5)}…`, body: own[2].text, citations: cite(own[2]) });
+    let made = 0;
+    for (const s of own) {
+      if (made >= 2) break;
+      const q = cloze(s, vocabulary, (questions.length % 3) + 1, c.id);
+      if (!q) continue;
+      questions.push(q);
+      made++;
+    }
+    const word = targetWord(own[0].text);
+    if (word) flashcards.push({ front: cap(word.toLowerCase()), back: own[0].text, citations: cite(own[0]) });
+  }
+  const keyPoints = all.slice(0, 2).map((s) => ({ text: s.text, citations: [{ page: s.page, quote: s.text }] }));
+  return JSON.stringify({ keyPoints, notes, questions, flashcards });
+}
+
 export class MockProvider implements AiProvider {
   readonly id = 'mock';
   readonly model = 'offline-extractive';
 
   async generate(request: LessonRequest): Promise<string> {
+    const output =
+      request.task?.kind === 'plan'
+        ? mockPlan(request.pages, request.task.maxLessons)
+        : request.task?.kind === 'lesson'
+          ? mockLesson(request.pages, request.task.concepts)
+          : this.course(request);
+    // No real tokens are used; the estimate keeps budget accounting exercised offline.
+    request.onUsage?.({
+      promptTokens: Math.ceil((request.system.length + request.prompt.length) / 4),
+      outputTokens: Math.ceil(output.length / 4),
+      estimated: true,
+    });
+    return output;
+  }
+
+  private course(request: LessonRequest): string {
     const sentences = splitSentences(request.pages);
     const vocabulary = [
       ...new Set(sentences.flatMap((s) => s.text.match(/[A-Za-z]{6,}/g) ?? []).map((w) => w.toLowerCase())),

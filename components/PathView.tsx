@@ -1,8 +1,10 @@
 'use client';
 
-import { Check, Clock, Lock, ShieldCheck, Star, Trash2, Trophy, Zap } from 'lucide-react';
+import { Check, Clock, ListChecks, Lock, ShieldCheck, Star, Trash2, Trophy, Zap } from 'lucide-react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
+import { summarizeCoverage } from '@/lib/learning/coverage';
 import { deleteGeneratedCourse } from '@/lib/learning/generated-store';
 import { isGeneratedCourse, sectionPath } from '@/lib/learning/links';
 import type { Course } from '@/lib/learning/types';
@@ -44,6 +46,11 @@ export function PathView({ course }: { course: Course }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
   const fromPdf = isGeneratedCourse(course);
   const report = course.generation?.report;
+  const coverage = course.coverage ? summarizeCoverage(course.coverage) : undefined;
+  // Planned lessons that have no generated section yet (never requested, or failed).
+  const waiting = (course.plan?.lessons ?? [])
+    .filter((l) => !ids.includes(l.id))
+    .map((lesson) => ({ lesson, state: course.lessonStates?.find((s) => s.lessonId === lesson.id) }));
 
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
 
@@ -97,6 +104,68 @@ export function PathView({ course }: { course: Course }) {
         </div>
       )}
 
+      {fromPdf && course.coverage && coverage && (
+        <div className="pad">
+          <div className={`note ${course.coverage.omissions.length ? 'note-warn' : 'note-info'} checknote`}>
+            <ListChecks size={20} />
+            <span>
+              <b>
+                {coverage.covered} of {coverage.concepts} planned concepts have an explanation and a practice question.
+              </b>{' '}
+              {coverage.pagesTaught} of {coverage.pagesWithText} pages with text are cited by a lesson.
+              {course.coverage.omissions.length > 0 ? (
+                <details className="omissions">
+                  <summary>
+                    What was left out ({course.coverage.omissions.length})
+                  </summary>
+                  <ul>
+                    {course.coverage.omissions.map((o, i) => (
+                      <li key={`${i}-${o}`}>{o}</li>
+                    ))}
+                  </ul>
+                </details>
+              ) : (
+                ' Nothing from the plan was left out.'
+              )}{' '}
+              This compares the lesson plan with the generated lessons. It cannot tell whether the plan itself missed
+              something, so check against your course material.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {fromPdf && waiting.length > 0 && (
+        <div className="pad">
+          <div className="card">
+            <div className="cardhead">
+              <h2>Not generated yet</h2>
+              <small>
+                {waiting.length} lesson{waiting.length === 1 ? '' : 's'}
+              </small>
+            </div>
+            <ul className="waitlist">
+              {waiting.map(({ lesson, state }) => (
+                <li key={lesson.id}>
+                  <b>{lesson.title}</b> <span className="pill pill-soft">{lesson.difficulty}</span>
+                  <small>
+                    {state?.status === 'failed'
+                      ? `Could not be generated: ${state.reason ?? 'unknown problem'}`
+                      : 'Waiting to be generated.'}
+                  </small>
+                </li>
+              ))}
+            </ul>
+            <p className="muted">
+              To generate {waiting.length === 1 ? 'it' : 'them'}, open Upload, choose the same PDF again and press
+              “Generate the remaining lessons”. Your finished lessons and progress are kept.
+            </p>
+            <Link href="/upload" className="textlink">
+              Go to Upload
+            </Link>
+          </div>
+        </div>
+      )}
+
       <section className="path" style={{ height: TOP + total * ROW + 96 }} aria-label="Learning path">
         <svg className="path-line" width="160" height={TOP + total * ROW} aria-hidden="true">
           <path d={curve(0, total - 1)} className="path-track" />
@@ -128,6 +197,7 @@ export function PathView({ course }: { course: Course }) {
                 )}
                 {status !== 'done' && (
                   <span className="node-meta">
+                    {course.plan && <>{s.difficulty} • </>}
                     <Clock size={13} /> {s.estMinutes}
                     <Zap size={13} /> +{s.xpReward} XP
                   </span>
@@ -138,7 +208,13 @@ export function PathView({ course }: { course: Course }) {
         })}
         <div className={`path-finish ${progress.pct === 100 ? 'won' : ''}`} style={{ top: TOP + total * ROW }}>
           <Trophy size={22} />
-          <span>{progress.pct === 100 ? 'Course complete. Nice work, Lion!' : `Finish all ${total} sections to complete the course`}</span>
+          <span>
+            {progress.pct === 100
+              ? waiting.length > 0
+                ? 'All generated lessons are done. Some planned lessons are still waiting.'
+                : 'Course complete. Nice work, Lion!'
+              : `Finish all ${total} sections to complete the course`}
+          </span>
         </div>
       </section>
 
