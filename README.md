@@ -38,7 +38,7 @@ To use real AI, copy `server/.env.example` to `.env` in the project root and set
 `node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
 ```bash
-npm test           # 71 tests, Node's built-in runner
+npm test           # 78 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```

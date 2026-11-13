@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import { expect } from './helpers/expect.ts';
 import { validateSectionGrounding } from '../lib/learning/grounding.ts';
 import { PageIndex, checkCitation } from '../lib/learning/verify.ts';
-import { generateCourse, GenerationError } from '../server/generate.ts';
+import { generateCourse, GenerationError, placeAnswer } from '../server/generate.ts';
 import { MockProvider } from '../server/providers/mock.ts';
 import type { AiProvider } from '../server/providers/types.ts';
 import { extractSample, SAMPLE_KEYS, SAMPLES } from './helpers/samples.ts';
@@ -215,6 +215,92 @@ describe('source-grounded lesson generation', () => {
     await expect(generateCourse(doc, scripted(JSON.stringify(injected)))).rejects.toMatchObject({
       code: 'nothing_grounded',
     });
+  });
+});
+
+describe('answer positions', () => {
+  /** A fully supported biology lesson in which the model put every correct answer first. */
+  const allFirst = () => {
+    const question = (level: number, prompt: string, right: string, wrong: string[], page: number, quote: string) => ({
+      level,
+      prompt,
+      choices: [right, ...wrong],
+      answerIndex: 0,
+      explanation: quote,
+      citations: cite(page, quote),
+    });
+    const section = (level: string, page: number, sentences: string[]) => ({
+      level,
+      title: `${level} section`,
+      objectives: ['Recall the page.'],
+      keyPoints: [],
+      notes: [{ title: 'Note', body: sentences[0], citations: cite(page, sentences[0]) }],
+      questions: sentences.slice(0, 3).map((s, i) =>
+        question(i + 1, `Question ${i + 1} about page ${page}?`, s, [`Wrong one ${i}`, `Wrong two ${i}`, `Wrong three ${i}`], page, s),
+      ),
+      flashcards: [],
+    });
+    const sentencesOf = (page: number) => bio[page - 1].split(/(?<=\.)\s+/);
+    return {
+      title: 'Photosynthesis',
+      sections: [
+        section('Beginner', 1, sentencesOf(1)),
+        section('Intermediate', 2, sentencesOf(2)),
+        section('Advanced', 3, sentencesOf(3)),
+      ],
+    };
+  };
+
+  it('does not leave every correct answer in the first position', async () => {
+    const doc = await extractSample('biology');
+    const raw = allFirst();
+    const course = await generateCourse(doc, scripted(JSON.stringify(raw)));
+    const questions = course.sections.flatMap((s) => s.questions);
+    expect(questions).toHaveLength(9);
+
+    const positions = questions.map((q) => q.answerIndex);
+    expect(new Set(positions).size).toBeGreaterThan(1);
+    expect(positions.filter((p) => p === 0).length).toBeLessThan(questions.length);
+    // Within a section, up to four questions each get a different position.
+    for (const section of course.sections) {
+      expect(new Set(section.questions.map((q) => q.answerIndex)).size).toBe(section.questions.length);
+    }
+  });
+
+  it('keeps grading accurate: the marked choice is still the model\'s correct answer', async () => {
+    const doc = await extractSample('biology');
+    const raw = allFirst();
+    const course = await generateCourse(doc, scripted(JSON.stringify(raw)));
+    for (const section of course.sections) {
+      const source = raw.sections.find((s) => s.level === section.difficulty)!;
+      for (const q of section.questions) {
+        const original = source.questions.find((x) => x.prompt === q.prompt)!;
+        expect(q.choices[q.answerIndex]).toBe(original.choices[original.answerIndex]);
+        expect([...q.choices].sort()).toEqual([...original.choices].sort());
+        expect(new Set(q.choices).size).toBe(4);
+      }
+    }
+  });
+
+  it('gives the same order every time for the same document', async () => {
+    const doc = await extractSample('biology');
+    const first = await generateCourse(doc, scripted(JSON.stringify(allFirst())));
+    const second = await generateCourse(doc, scripted(JSON.stringify(allFirst())));
+    const order = (c: typeof first) => c.sections.flatMap((s) => s.questions.map((q) => q.choices));
+    expect(order(second)).toEqual(order(first));
+  });
+
+  it('placeAnswer moves the answer to any slot from any starting index without losing a choice', () => {
+    const choices = ['a', 'b', 'c', 'd'];
+    for (let from = 0; from < 4; from++) {
+      for (let slot = 0; slot < 4; slot++) {
+        const placed = placeAnswer(choices, from, slot, () => 0.42);
+        expect(placed.answerIndex).toBe(slot);
+        expect(placed.choices[slot]).toBe(choices[from]);
+        expect([...placed.choices].sort()).toEqual(choices);
+      }
+    }
+    expect(placeAnswer(choices, 1, 99, () => 0.42).answerIndex).toBe(3);
   });
 });
 

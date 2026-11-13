@@ -8,12 +8,12 @@ Mobile-first study app: course PDF -> short lessons, quizzes, flashcards. Next.j
 npm ci
 npm run dev      # frontend, http://localhost:3000
 npm run server   # lesson backend, http://127.0.0.1:8787 (offline sample mode without a key)
-npm test         # 71 tests, Node built-in runner
+npm test         # 78 tests, Node built-in runner
 npm run lint     # tsc --noEmit
 npm run build
 ```
 
-Node 24+. The test files contain 67 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 71. `node scripts/validate-provider.ts` makes real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
+Node 24+. The test files contain 74 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 78. `node scripts/validate-provider.ts` makes real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
 
 ## Guardrails
 

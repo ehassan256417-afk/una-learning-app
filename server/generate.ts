@@ -40,6 +40,52 @@ const XP_REWARD: Record<Difficulty, number> = { Beginner: 30, Intermediate: 40, 
 const MIN_NOTES = 1;
 const MIN_QUESTIONS = 2;
 
+/** Small deterministic random source, seeded from text (FNV-1a hash feeding mulberry32). */
+function seededRandom(seed: string): () => number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  let state = h >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffled<T>(items: readonly T[], random: () => number): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+/**
+ * Models tend to write the correct answer first. This moves it to `slot` and
+ * shuffles the wrong answers around it, returning the new position so grading
+ * still points at the same choice text.
+ */
+export function placeAnswer(
+  choices: readonly string[],
+  answerIndex: number,
+  slot: number,
+  random: () => number,
+): { choices: string[]; answerIndex: number } {
+  const wrong = shuffled(
+    choices.filter((_, i) => i !== answerIndex),
+    random,
+  );
+  const target = Math.max(0, Math.min(slot, choices.length - 1));
+  const out = [...wrong.slice(0, target), choices[answerIndex], ...wrong.slice(target)];
+  return { choices: out, answerIndex: target };
+}
+
 interface Tally {
   checked: number;
   kept: number;
@@ -77,18 +123,25 @@ function buildSection(raw: RawSection, index: PageIndex, documentId: string, tal
     notes.push({ id: `${id}-n${i + 1}`, title: n.title, body: n.body, keyTerm, provenance: pdf(citations) });
   });
 
+  // Answer positions are seeded from the document and section, so the same PDF
+  // always gives the same quiz. Each run of four questions uses every position
+  // once, which keeps the correct answer from sitting in one place.
+  const random = seededRandom(`${documentId}|${id}`);
+  let slots: number[] = [];
   const questions: QuizQuestion[] = [];
   raw.questions.forEach((q, i) => {
     const claim = `${q.choices[q.answerIndex]} ${q.explanation}`;
     const citations = check('question', claim, q.citations, index, documentId, tally);
     if (!citations) return;
     const level = q.level as LearningLevel;
+    if (slots.length === 0) slots = shuffled([0, 1, 2, 3], random);
+    const placed = placeAnswer(q.choices, q.answerIndex, slots.shift()!, random);
     questions.push({
       id: `${id}-q${i + 1}`,
       level,
       prompt: q.prompt,
-      choices: q.choices,
-      answerIndex: q.answerIndex,
+      choices: placed.choices,
+      answerIndex: placed.answerIndex,
       explanation: q.explanation,
       xp: level * 10,
       provenance: pdf(citations),
