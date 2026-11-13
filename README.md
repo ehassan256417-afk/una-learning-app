@@ -1,62 +1,112 @@
-# UNA Learning — Mobile-first Prototype
+# UNA Learning
 
-Independent student project for UNA students. **Not affiliated with or endorsed by the University of North Alabama.** The lion mascot is original SVG artwork for this project; no official university marks are used.
+Mobile-first study app that turns course PDFs into short lessons, quizzes and flashcards.
 
-## Start
+Independent student project for UNA students. **Not affiliated with or endorsed by the University of North Alabama.** The lion mascot is original artwork; no official university marks are used.
+
+Live demo (static frontend): https://ehassan256417-afk.github.io/una-learning-app/
+
+## What works
+
+| Area | Status |
+| --- | --- |
+| Dashboard, learning path, pre-lesson, lesson, quiz, flashcards, progress, profile | Working, with demo courses labeled "Demo" |
+| PDF upload with validation (type, size, file signature, page limit, scanned-PDF detection) | Working in the browser |
+| PDF text extraction with page numbers | Working in the browser; the file never leaves the device |
+| Lesson backend (`server/`) with provider abstraction | Working locally |
+| Offline sample provider (no AI, no key) | Working, used by tests and local development |
+| Gemini provider (free tier) | Implemented and unit-tested against a mocked API. **Not yet run against the real API** (needs a key) |
+| Grounding check of generated content against the PDF | Working |
+| Saved lessons (no repeated AI requests) | Working: browser storage plus a short-lived backend cache |
+| Hosted AI backend | **Not deployed.** The live site shows "not connected" on the Upload screen |
+
+## Run it
+
+Requires Node 24 or newer.
 
 ```bash
 npm install
-npm run dev
+npm run dev        # frontend at http://localhost:3000
+npm run server     # lesson backend at http://127.0.0.1:8787 (second terminal)
 ```
 
-Open http://localhost:3000 (best viewed at phone width).
+Without a key the backend runs in **offline sample mode**: it builds lessons by copying sentences from the PDF and blanking out words. That exercises the whole flow but is not AI.
+
+To use Gemini, copy `server/.env.example` to `.env` in the project root and set `GEMINI_API_KEY` (free-tier key from Google AI Studio; do not enable billing). `.env` is git-ignored.
 
 ```bash
-npm run lint    # TypeScript check
-npm run build   # production build
+npm test           # 62 tests, Node's built-in runner
+npm run lint       # TypeScript check
+npm run build      # production build
 ```
 
-## Screens
-
-| Route | Screen |
-| --- | --- |
-| `/` | Dashboard: stats, Start Learning, courses, badges |
-| `/courses` | Course list |
-| `/courses/[courseId]` | Learning path (sections unlock in order) |
-| `/courses/[courseId]/[sectionId]` | Pre-lesson: objectives, reward, key points, source |
-| `/courses/[courseId]/[sectionId]/lesson` | Lesson player: notes, 3-level quiz, flashcards, results |
-| `/upload` | PDF picker (local validation only) and the planned pipeline |
-| `/progress` | Level, streak, course progress, badges |
-| `/profile` | Display name, project notices, reset progress |
-
-## Demo data
-
-- All courses, lessons, questions and starting stats are **sample content** in `lib/learning/demo-data.ts`. Nothing was extracted from or verified against a real PDF.
-- Every content item carries `provenance: { kind: 'demo' }`, and the UI shows a "Demo" label wherever it appears.
-- Progress is stored in the browser (`localStorage`, key `una-learning:progress:v1`). No accounts, no server, no AI calls, no paid APIs.
-- Choosing a PDF on the Upload screen does not upload or read the file.
-
-## Structure
+## Architecture
 
 ```
-app/                 routes (server components that load data from the engine)
-components/          screens and shared UI (client components)
-lib/learning/
-  types.ts           domain model, including Provenance and SourceCitation
-  engine.ts          LearningEngine interface + demo implementation
-  grounding.ts       validator that rejects uncited generated content
-  demo-data.ts       sample courses
-lib/progress/        local progress store and derived badges
+Browser (GitHub Pages, static)                Lesson backend (server/, not deployed)
+------------------------------                -------------------------------------
+PDF file  -> validate -> extract text         POST /api/lessons/generate
+             (pdf.js, on device)       ---->    validate request, rate-limit
+only { page, text } is sent                     AI provider (Gemini | offline mock)
+                                                parse JSON, check every item against
+course saved in browser storage  <----          the page text, drop what fails
+opened via /my?c=...                            return verified course
 ```
 
-## Preparing for the PDF AI Learning Engine
+- **The PDF file is never uploaded.** Text is extracted in the browser and only that text is sent to the backend.
+- **API keys live only on the backend.** No key, provider URL or backend address is in the Pages bundle.
+- **Nothing private goes to GitHub.** `*.pdf` and `.env*` are git-ignored; test PDFs are synthetic and generated in memory.
+- **Lessons are stored on the student's device** (`localStorage`). The backend keeps results in memory only, for up to 24 hours, keyed by a hash of the text.
 
-The UI only talks to `getLearningEngine()` in `lib/learning/engine.ts`. To add the real engine:
+```
+app/                 routes; /my opens PDF courses from browser storage
+components/          screens and shared UI
+lib/pdf/             validation and page-level text extraction
+lib/learning/        types, API contracts, grounding verification, browser store
+server/              HTTP API, generation pipeline, providers, request guards
+tests/               unit and end-to-end tests with sample PDFs (biology, history, computing)
+```
 
-1. Implement `LearningEngine` (`listCourses`, `getCourse`, `getSection`, `ingestPdf`) against private storage.
-2. Extract PDF text per page and keep page numbers with every chunk.
-3. Generate sections from retrieved chunks only, emitting `provenance: { kind: 'pdf', documentId, citations }`.
-4. Run `validateSectionGrounding` on every section and drop anything it flags.
-5. Return the new engine from `getLearningEngine()`. Screens already render page citations for non-demo content.
+## Lesson format
 
-Before a pilot: private storage, access control, rate limiting, unsupported-content rejection and a privacy review.
+The provider must return JSON with three sections (Beginner, Intermediate, Advanced). Each has objectives, key points, notes, three questions (difficulty 1 to 3) and flashcards. Every note, key point, question and flashcard carries citations:
+
+```json
+{ "page": 2, "quote": "exact words copied from page 2" }
+```
+
+See `server/prompt.ts` (instructions) and `server/schema.ts` (validation).
+
+## Grounding verification, and its limits
+
+For every generated item, `lib/learning/verify.ts` checks that:
+
+1. each cited quote really appears in the PDF (word for word, or with a very small difference), and on which page;
+2. most of the item's key terms appear on the cited page.
+
+Items that fail are removed, and a course with nothing left is rejected. The app shows how many items were kept and removed.
+
+**This does not guarantee accuracy.** The checks are lexical. They catch invented quotes, wrong pages and off-topic claims, but a statement can reuse the right words and still be wrong, misleading or incomplete. Lessons are a study aid; students should confirm important points in their course material.
+
+## Before deploying the backend
+
+The backend is intentionally not deployed. Review these first:
+
+- [ ] **Authentication.** There is none. CORS only restricts browsers; anyone can call the API directly. Add sign-in or signed requests.
+- [ ] **Rate limits.** Per-address and daily caps are in memory and reset on restart. Use a shared store if there is more than one instance, and set `DAILY_GENERATION_CAP` to fit the free quota.
+- [ ] **Origin allow-list.** Set `ALLOWED_ORIGINS` to the exact site origin (for Pages: `https://ehassan256417-afk.github.io`). Keep `ALLOW_NO_ORIGIN` off.
+- [ ] **Data handling.** Student text is sent to the AI provider. Check the provider's terms for the free tier (data may be used to improve their products) and tell students before they upload.
+- [ ] **Course material rights.** Students should only upload material they are allowed to use.
+- [ ] **Logging.** The server logs method, path, status and timing only. Keep it that way on the host.
+- [ ] **HTTPS and secrets.** Serve over HTTPS and store the key in the host's secret manager, not in the repo.
+- [ ] **No billing.** Keep the Google project on the free tier with billing disabled.
+- [ ] **Real-model test.** Run the pipeline against Gemini with a few real chapters and read the results critically.
+
+After that, build the frontend with `NEXT_PUBLIC_LESSON_API_URL` set to the backend's URL.
+
+## Known limits
+
+- Scanned or image-only PDFs are not supported (no OCR).
+- Limits: 25 MB, 60 pages, 150,000 characters; long documents are trimmed before generation.
+- Lessons are per device; there are no accounts or sync.
+- Demo courses and starting stats are sample content.
