@@ -77,6 +77,10 @@ const lessonRequestSchema = z.object({
         importance: z.enum(['core', 'supporting']),
         pages: z.array(pageNumber).max(80),
         prerequisites: z.array(shortId).max(12),
+        includes: z
+          .array(z.object({ name: z.string().trim().min(1).max(120), summary: z.string().trim().min(1).max(400) }))
+          .max(3)
+          .optional(),
         evidence: z
           .array(
             z.object({

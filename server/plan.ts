@@ -1,6 +1,6 @@
 import { LIMITS } from '../lib/learning/contracts.ts';
 import type { Difficulty, FlaggedItem, LessonPlan, PlanConcept, PlannedLesson } from '../lib/learning/types.ts';
-import { claimSupport, normalizeText, PageIndex, verifyItem } from '../lib/learning/verify.ts';
+import { claimSupport, contentWords, normalizeText, PageIndex, verifyItem } from '../lib/learning/verify.ts';
 import { documentIdFor } from '../lib/pdf/extract.ts';
 import { GenerationError, type SourceDocument } from './generate.ts';
 import { fitPagesToBudget } from './prompt.ts';
@@ -15,7 +15,9 @@ import { LessonParseError, parsePlanJson, type RawPlan } from './schema.ts';
  */
 
 /** Bump when the planning prompt or rules change, so cached plans are not reused. */
-export const PLAN_VERSION = 'p1';
+export const PLAN_VERSION = 'p2';
+/** Supporting details folded into one concept at most. More than this and they stay concepts of their own. */
+const MAX_FOLDED_DETAILS = 3;
 /** The plan is the only request that sees the whole document, so it gets the full text allowance. */
 export const PLAN_CHAR_BUDGET = LIMITS.maxChars;
 export const MAX_CONCEPTS_PER_LESSON = 4;
@@ -59,7 +61,8 @@ Return JSON in exactly this shape:
 
 Concepts:
 - List every main topic and subtopic the document actually explains. Do not list something it only names in passing, and do not list anything it does not contain.
-- "core" = a student must learn it to understand the document. "supporting" = useful detail.
+- A concept is an idea that needs its own explanation. A single fact, property, example or name that belongs to a concept is NOT a separate concept: put it in that concept's summary instead. Most pages of text explain one to three concepts; list more only when the document really explains more.
+- "core" = a student must learn it to understand the document. "supporting" = a useful detail that depends on one core concept; give that concept as its only prerequisite.
 - A concept can span several pages: list every page it is explained on, and give evidence from more than one page when it does.
 - "prerequisites" = ids of OTHER concepts in your list that must be understood first. Leave it empty if there are none. Never name something that is not in your list.
 - difficulty: Beginner = definitions and basic facts. Intermediate = how ideas connect or are applied. Advanced = comparison, analysis, trade-offs and edge cases.
@@ -172,13 +175,37 @@ export function normalizePlan(raw: RawPlan, document: SourceDocument, documentId
     }
   }
 
+  // 2b. Fold small details into the concept they belong to. Planners tend to list every fact as a
+  // concept, which multiplies lessons. A supporting concept with exactly one prerequisite, explained
+  // on that prerequisite's own pages, is taught as part of it instead of getting a lesson slot.
+  const foldedInto = new Map<string, string>();
+  for (const c of concepts) {
+    if (c.importance !== 'supporting' || c.prerequisites.length !== 1 || c.includes?.length) continue;
+    const parent = byId.get(c.prerequisites[0]);
+    if (!parent || foldedInto.has(parent.id) || (parent.includes?.length ?? 0) >= MAX_FOLDED_DETAILS) continue;
+    if (!c.pages.every((p) => parent.pages.includes(p))) continue;
+    parent.includes = [...(parent.includes ?? []), { name: c.name, summary: c.summary }];
+    parent.evidence = [...parent.evidence, ...c.evidence].slice(0, 6);
+    foldedInto.set(c.id, parent.id);
+  }
+  if (foldedInto.size > 0) {
+    const kept = concepts.filter((c) => !foldedInto.has(c.id));
+    concepts.length = 0;
+    concepts.push(...kept);
+    for (const c of concepts) {
+      c.prerequisites = unique(c.prerequisites.map((p) => foldedInto.get(p) ?? p)).filter((p) => p !== c.id);
+    }
+  }
+  const resolve = (rawId: string) => {
+    const id = idMap.get(rawId);
+    return id ? (foldedInto.get(id) ?? id) : undefined;
+  };
+
   // 3. Lessons: each concept in exactly one, large lessons split, leftovers grouped by difficulty.
   const assigned = new Set<string>();
   const groups: Group[] = [];
   for (const lesson of raw.lessons) {
-    const ids = unique(lesson.conceptIds.map((x) => idMap.get(x)).filter((x): x is string => !!x)).filter(
-      (id) => !assigned.has(id),
-    );
+    const ids = unique(lesson.conceptIds.map(resolve).filter((x): x is string => !!x)).filter((id) => !assigned.has(id));
     if (ids.length === 0) continue;
     ids.forEach((id) => assigned.add(id));
     if (ids.length <= MAX_CONCEPTS_PER_LESSON) {
@@ -187,14 +214,25 @@ export function normalizePlan(raw: RawPlan, document: SourceDocument, documentId
     }
     const parts = Math.ceil(ids.length / MAX_CONCEPTS_PER_LESSON);
     const size = Math.ceil(ids.length / parts);
-    for (let k = 0; k < parts; k++) {
-      groups.push({
-        title: `${lesson.title} (part ${k + 1} of ${parts})`,
-        difficulty: lesson.difficulty,
-        conceptIds: ids.slice(k * size, (k + 1) * size),
-        objectives: [],
-      });
+    const split = Array.from({ length: parts }, (_, k) => ({
+      title: `${lesson.title} (part ${k + 1} of ${parts})`,
+      difficulty: lesson.difficulty,
+      conceptIds: ids.slice(k * size, (k + 1) * size),
+      objectives: [] as string[],
+    }));
+    // Each objective goes to the part that teaches the concepts it names. A concept counts only
+    // when its whole name appears, and longer names count for more ("self join" beats "join").
+    for (const objective of lesson.objectives) {
+      const words = new Set(contentWords(objective));
+      const score = (g: Group) =>
+        g.conceptIds
+          .map((id) => contentWords(byId.get(id)!.name))
+          .filter((name) => name.length > 0 && name.every((w) => words.has(w)))
+          .reduce((n, name) => n + name.length, 0);
+      const best = split.reduce((a, b) => (score(b) > score(a) ? b : a));
+      if (score(best) > 0) best.objectives.push(objective);
     }
+    groups.push(...split);
   }
   for (const level of LEVELS) {
     const rest = concepts

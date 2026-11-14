@@ -156,6 +156,62 @@ describe('adaptive plan: lesson count follows the concepts', () => {
     expect(plan.lessons[0].title).toContain('part 1 of 3');
   });
 
+  it('keeps each objective with the part that teaches it when a lesson is split', async () => {
+    const plan = await planFor([
+      {
+        title: 'Everything',
+        conceptIds: JOIN_CONCEPTS.map((c) => c.id),
+        objectives: ['Explain what a primary key identifies.', 'Describe what a self join does with aliases.', 'Bake a chocolate cake.'],
+      },
+    ]);
+    expect(plan.lessons[lessonWith(plan, 'Primary key')].objectives).toEqual(['Explain what a primary key identifies.']);
+    expect(plan.lessons[lessonWith(plan, 'Self join')].objectives).toEqual(['Describe what a self join does with aliases.']);
+    expect(plan.lessons.flatMap((l) => l.objectives)).not.toContain('Bake a chocolate cake.');
+  });
+
+  it('folds a small supporting detail into its concept instead of giving it a lesson slot', async () => {
+    const doc = await extractSample('biology');
+    const bio = SAMPLES.biology.pages.map((p) => p.split(/(?<=\.)\s+/));
+    const raw = parsePlanJson(
+      JSON.stringify({
+        title: 'Photosynthesis',
+        concepts: [
+          concept('lim', 'Limiting factors', 3, bio[2][0]),
+          // One prerequisite, same page: a detail of "Limiting factors".
+          concept('light', 'Light intensity', 3, bio[2][1], { importance: 'supporting', prerequisites: ['lim'] }),
+          concept('calvin', 'Calvin cycle', 2, bio[1][3]),
+          // Two prerequisites: stays a concept of its own.
+          concept('temp', 'Temperature', 3, bio[2][3], { importance: 'supporting', prerequisites: ['lim', 'calvin'] }),
+          // One prerequisite but explained on another page: stays a concept of its own.
+          concept('stomata', 'Stomata', 1, bio[0][4], { importance: 'supporting', prerequisites: ['lim'] }),
+        ],
+        lessons: [
+          { title: 'What limits the rate', conceptIds: ['lim', 'light', 'temp'], objectives: [] },
+          { title: 'Other ideas', conceptIds: ['calvin', 'stomata'], objectives: [] },
+        ],
+      }),
+    );
+    const plan = normalizePlan(raw, doc, doc.id, 10);
+    expect(plan.concepts.map((c) => c.name)).toEqual(['Limiting factors', 'Calvin cycle', 'Temperature', 'Stomata']);
+    expect(plan.flagged).toEqual([]);
+    const parent = plan.concepts[0];
+    expect(parent.includes).toEqual([{ name: 'Light intensity', summary: bio[2][1] }]);
+    expect(parent.evidence.map((e) => e.excerpt)).toEqual([bio[2][0], bio[2][1]]);
+    // The lesson that listed the detail now lists its concept once.
+    const limits = plan.lessons.find((l) => l.title === 'What limits the rate')!;
+    expect(limits.conceptIds).toEqual([parent.id, idOf(plan, 'Temperature')]);
+    expect(plan.concepts.find((c) => c.name === 'Temperature')!.prerequisites).toEqual([parent.id, idOf(plan, 'Calvin cycle')]);
+
+    // The lesson request still asks for the detail to be explained.
+    const provider = scripted('', () => 'not json');
+    await createLesson(
+      { documentId: doc.id, documentName: doc.name, pages: doc.pages.filter((p) => limits.pages.includes(p.page)), lesson: limits, concepts: plan.concepts, taught: [] },
+      provider,
+      { maxTokens: 6000 },
+    ).catch(() => undefined);
+    expect(provider.requests[0].prompt).toContain('also explain this detail of it: Light intensity');
+  });
+
   it('gives lessons to concepts the planner forgot to place, grouped by difficulty', async () => {
     const plan = await planFor([]);
     expect(plan.lessons.map((l) => l.difficulty)).toEqual(['Beginner', 'Beginner', 'Intermediate', 'Advanced']);

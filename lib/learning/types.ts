@@ -53,6 +53,11 @@ export interface PlanConcept {
   /** Ids of other concepts in the same plan that should be learned first. */
   prerequisites: string[];
   evidence: SourceCitation[];
+  /**
+   * Small supporting details the planner listed separately that belong to this
+   * concept. They are taught inside this concept's lesson, not as lessons of their own.
+   */
+  includes?: Array<{ name: string; summary: string }>;
 }
 
 /** One lesson in the adaptive plan. It becomes a `Section` once generated. */

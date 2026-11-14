@@ -13,7 +13,7 @@ import { LessonParseError, parseLessonContentJson, type RawLessonContent } from 
  */
 
 /** Bump when the lesson prompt or output format changes, so cached lessons are not reused. */
-export const LESSON_VERSION = 'l1';
+export const LESSON_VERSION = 'l2';
 /** Text sent with one lesson request. A lesson's pages are trimmed evenly if they exceed it. */
 export const LESSON_CHAR_BUDGET = 24_000;
 
@@ -51,7 +51,13 @@ const oneLine = (s: string, max: number) =>
 export function buildLessonPrompt(input: LessonInput, pages: ExtractedPage[]): string {
   const source = pages.map((p) => `<<<PAGE ${p.page}>>>\n${p.text}`).join('\n\n');
   const concepts = input.concepts
-    .map((c) => `- ${c.id}: ${oneLine(c.name, 120)}. ${oneLine(c.summary, 400)} (pages ${c.pages.join(', ')})`)
+    .map((c) => {
+      const details = (c.includes ?? [])
+        .slice(0, 3)
+        .map((d) => `\n    - also explain this detail of it: ${oneLine(d.name, 120)}. ${oneLine(d.summary, 400)}`)
+        .join('');
+      return `- ${c.id}: ${oneLine(c.name, 120)}. ${oneLine(c.summary, 400)} (pages ${c.pages.join(', ')})${details}`;
+    })
     .join('\n');
   const taught = input.taught.length
     ? `\nAlready taught in earlier lessons (do not explain these again; you may refer to them):\n${input.taught

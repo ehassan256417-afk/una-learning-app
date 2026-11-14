@@ -38,7 +38,7 @@ To use real AI, copy `server/.env.example` to `.env` in the project root and set
 `node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
 ```bash
-npm test           # 109 tests, Node's built-in runner
+npm test           # 111 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```
@@ -74,7 +74,7 @@ tests/               unit and end-to-end tests with sample PDFs (biology, histor
 
 Lessons follow the concepts in the PDF, not its page count and not a fixed number.
 
-1. **Plan** (`POST /api/lessons/plan`, one AI request). The model reads the whole text with page markers and proposes concepts (name, summary, difficulty, core or supporting, pages, prerequisites, evidence quotes) and lessons. `server/plan.ts` then applies fixed rules: a concept is kept only if its quotes are found in the PDF; unknown or circular prerequisites are removed; a lesson with more than 4 concepts is split; concepts the model forgot are grouped by difficulty; lessons are ordered so prerequisites come first. Anything left out is recorded with a reason.
+1. **Plan** (`POST /api/lessons/plan`, one AI request). The model reads the whole text with page markers and proposes concepts (name, summary, difficulty, core or supporting, pages, prerequisites, evidence quotes) and lessons. `server/plan.ts` then applies fixed rules: a concept is kept only if its quotes are found in the PDF; unknown or circular prerequisites are removed; a small supporting detail (one prerequisite, explained on that concept's own pages) is folded into its concept and taught inside that lesson, up to 3 per concept; a lesson with more than 4 concepts is split, with each objective kept by the part that teaches it; concepts the model forgot are grouped by difficulty; lessons are ordered so prerequisites come first. Anything left out is recorded with a reason.
 2. **Lessons** (`POST /api/lessons/lesson`, one AI request per planned lesson). Each request carries only the pages that lesson's concepts cite, and a small output cap. Notes are labelled what / why / how / example; an example is shown only if it appears on a cited page; questions whose prompt already contains the answer are removed. The quote, page and key-term checks and the answer shuffling are the same as before.
 3. **Coverage** (`lib/learning/coverage.ts`). After every lesson the app works out which planned concepts have both an explanation and a practice question, which pages are cited, and lists what was left out. This compares the plan with the lessons; it cannot tell whether the plan itself missed something.
 
@@ -92,6 +92,8 @@ The browser runs the loop (`lib/learning/adaptive.ts`) and saves the course afte
 Plans and lessons are cached in memory for 24 hours, and the daily cap still applies. Limits: the per-course budget is tied to the client address, so it is a cost guard for honest use, not a defence against abuse (there is still no authentication); a failed request that reports no usage is counted as a request but as 0 tokens.
 
 The older single-request endpoint (`POST /api/lessons/generate`) still exists for the validation script; the app no longer uses it.
+
+`node scripts/validate-adaptive.ts biology` runs the adaptive flow against the live provider with a synthetic sample PDF and a hard request limit (`VALIDATE_MAX_CALLS`, default 4). It makes real API calls, so run it on purpose. A run on 2026-11-13 used 4 requests, 61 seconds and about 11,400 tokens for a plan and three lessons.
 
 ## Lesson format
 
