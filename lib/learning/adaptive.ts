@@ -58,6 +58,7 @@ const STOP_CODES = new Set([
   'budget_exhausted',
   'rate_limited',
   'provider_rate_limited',
+  'provider_unavailable',
   'provider_not_configured',
   'forbidden_origin',
   'network',

@@ -1,4 +1,4 @@
-import { ProviderError, type AiProvider, type LessonRequest } from './types.ts';
+import { ProviderError, unavailableError, type AiProvider, type LessonRequest } from './types.ts';
 
 /**
  * Google Gemini via the Generative Language REST API (free tier compatible).
@@ -71,6 +71,7 @@ export class GeminiProvider implements AiProvider {
     if (response.status === 401 || response.status === 403) {
       throw new ProviderError('not_configured', 'The AI provider rejected the server credentials.');
     }
+    if (response.status >= 500) throw unavailableError(response);
     if (!response.ok) {
       // The provider's error body is not forwarded: it can echo request details.
       throw new ProviderError('failed', `The AI provider returned an error (HTTP ${response.status}).`);

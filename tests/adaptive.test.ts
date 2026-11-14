@@ -461,6 +461,17 @@ describe('per-course budget', () => {
     expect(budgets.use('other')).toMatchObject({ requests: 0, tokens: 0 });
   });
 
+  it('gives the request back when the provider never took it', () => {
+    const budgets = new CourseBudgets({ maxRequests: 2, maxTokens: 10_000 });
+    budgets.begin('course', 4_000)(0, true);
+    expect(budgets.use('course')).toEqual({ requests: 0, maxRequests: 2, tokens: 0, maxTokens: 10_000 });
+    // Tokens that were reported are always kept, and a request is only ever given back once.
+    const second = budgets.begin('course', 4_000);
+    second(900, true);
+    second(0, true);
+    expect(budgets.use('course')).toEqual({ requests: 0, maxRequests: 2, tokens: 900, maxTokens: 10_000 });
+  });
+
   it('starts fresh after the entry expires', () => {
     let now = 0;
     const budgets = new CourseBudgets({ maxRequests: 1, maxTokens: 100 }, 1_000, () => now);
@@ -731,6 +742,25 @@ describe('adaptive generation driver (browser side)', () => {
     expect(result).toMatchObject({ ready: 2, failed: 1, pending: 2 });
     expect(result.stopped).toMatchObject({ code: 'budget_exhausted' });
     expect(result.course.sections).toHaveLength(2);
+  });
+
+  it('stops at once when the AI provider is down, keeping what exists and leaving the rest to resume', async () => {
+    const doc = await joinsDoc();
+    const down = { code: 'provider_unavailable', message: 'The AI provider is temporarily unavailable.' };
+    const api = localApi(scripted(rawPlan(FIVE_LESSONS)), { 1: down });
+    const { saved, save } = saver();
+    const result = await generateAdaptiveCourse({ doc, api, save });
+    // One failed request, not one per remaining lesson.
+    expect(api.lessonCalls).toBe(2);
+    expect(result).toMatchObject({ ready: 1, failed: 1, pending: 3 });
+    expect(result.stopped).toMatchObject(down);
+    expect(saved.at(-1)!.sections).toHaveLength(1);
+
+    const again = localApi(scripted(rawPlan(FIVE_LESSONS)));
+    const resumed = await generateAdaptiveCourse({ doc, api: again, save, resume: saved.at(-1)! });
+    expect(again.planCalls).toBe(0);
+    expect(again.lessonCalls).toBe(4);
+    expect(resumed).toMatchObject({ ready: 5, failed: 0, pending: 0 });
   });
 
   it('stops after two lessons fail in a row instead of working through the rest', async () => {

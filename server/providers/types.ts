@@ -41,14 +41,40 @@ export interface AiProvider {
   generate(request: LessonRequest): Promise<string>;
 }
 
-export type ProviderErrorCode = 'not_configured' | 'rate_limited' | 'failed';
+/**
+ * `unavailable` is a 5xx answer: the provider could not take the request at
+ * all, so no tokens were used and the document is not the cause. `failed`
+ * covers everything else that went wrong, including answers that did cost tokens.
+ */
+export type ProviderErrorCode = 'not_configured' | 'rate_limited' | 'unavailable' | 'failed';
 
 export class ProviderError extends Error {
   code: ProviderErrorCode;
+  /** Seconds to wait before asking again, when known. */
+  retryAfterSec?: number;
 
-  constructor(code: ProviderErrorCode, message: string) {
+  constructor(code: ProviderErrorCode, message: string, retryAfterSec?: number) {
     super(message);
     this.code = code;
     this.name = 'ProviderError';
+    if (retryAfterSec !== undefined) this.retryAfterSec = retryAfterSec;
   }
+}
+
+/** Reads a Retry-After header given in whole seconds. Dates and anything else are ignored. */
+export function retryAfterSeconds(value: string | null): number | undefined {
+  const text = (value ?? '').trim();
+  return /^\d{1,6}$/.test(text) ? Number(text) : undefined;
+}
+
+/**
+ * The error for a 5xx status. The provider's error body is never read into it:
+ * it can echo request details.
+ */
+export function unavailableError(response: Response): ProviderError {
+  return new ProviderError(
+    'unavailable',
+    `The AI provider is temporarily unavailable (HTTP ${response.status}).`,
+    retryAfterSeconds(response.headers.get('retry-after')),
+  );
 }

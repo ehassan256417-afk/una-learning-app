@@ -1,4 +1,4 @@
-import { ProviderError, type AiProvider, type LessonRequest } from './types.ts';
+import { ProviderError, unavailableError, type AiProvider, type LessonRequest } from './types.ts';
 
 /**
  * ZRO (https://zro.moonmath.ai) via its Chat Completions API.
@@ -206,6 +206,8 @@ export class ZroProvider implements AiProvider {
     if (response.status === 404) {
       throw new ProviderError('not_configured', 'The configured AI model is not available from the provider.');
     }
+    // 5xx: ZRO could not serve the request (seen as HTTP 503 "Request failed." within a second, for any prompt).
+    if (response.status >= 500) throw unavailableError(response);
     if (!response.ok) {
       throw new ProviderError('failed', `The AI provider returned an error (HTTP ${response.status}).`);
     }

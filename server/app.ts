@@ -12,6 +12,7 @@ import {
 } from '../lib/learning/contracts.ts';
 import type { Course, LessonPlan } from '../lib/learning/types.ts';
 import { documentIdFor } from '../lib/pdf/extract.ts';
+import { ProviderAvailability } from './availability.ts';
 import { BudgetError, CourseBudgets, estimateTokens, type BudgetLimits } from './budget.ts';
 import { generateCourse, GenerationError } from './generate.ts';
 import { checkLessonInput, createLesson, LESSON_CHAR_BUDGET, LESSON_VERSION, type LessonInput } from './lesson.ts';
@@ -57,6 +58,8 @@ export interface AppOptions {
   providerFor?: (model: string) => AiProvider;
   /** Set when the server sits behind a reverse proxy that adds X-Forwarded-For. */
   trustProxy?: boolean;
+  /** Tracks provider outages. Passed in by tests that need to control the clock. */
+  availability?: ProviderAvailability;
 }
 
 /** Characters of fixed instructions sent with every request, for the worst-case token estimate. */
@@ -178,6 +181,44 @@ export function createApp(options: AppOptions): RequestListener {
     }
     return chosen;
   };
+
+  /*
+   * Provider outages. A 5xx answer pauses that provider for a short while:
+   * requests in the pause are refused here, without calling the provider, and
+   * the student is told when to try again. Nothing is ever re-sent on its own.
+   */
+  const availability = options.availability ?? new ProviderAvailability();
+  const providerKey = (p: AiProvider) => `${p.id}|${p.model}`;
+  const outageError = (waitSec: number) => {
+    const wait = Math.max(1, Math.round(waitSec));
+    const when = wait < 90 ? `${wait} seconds` : `${Math.ceil(wait / 60)} minutes`;
+    return new HttpError(
+      503,
+      'provider_unavailable',
+      `The AI provider is temporarily unavailable. Your file is fine and no AI credits were used. Try again in about ${when}.`,
+      { 'retry-after': String(wait) },
+    );
+  };
+  const isOutage = (err: unknown): err is ProviderError => err instanceof ProviderError && err.code === 'unavailable';
+  const assertAvailable = (p: AiProvider) => {
+    const wait = availability.waitSec(providerKey(p));
+    if (wait > 0) throw outageError(wait);
+  };
+  /** Runs one provider request and records whether the provider was able to take it. */
+  async function watched<T>(p: AiProvider, run: () => Promise<T>): Promise<T> {
+    try {
+      const result = await run();
+      availability.succeeded(providerKey(p));
+      return result;
+    } catch (err) {
+      if (isOutage(err)) {
+        err.retryAfterSec = availability.failed(providerKey(p), err.retryAfterSec);
+        // Provider id, upstream status and the pause only. Never document text or the provider's error body.
+        log(`provider ${p.id} unavailable: ${err.message} Paused for ${err.retryAfterSec}s.`);
+      }
+      throw err;
+    }
+  }
 
   const platformRoutes = platform
     ? createPlatformRoutes(platform, {
@@ -332,13 +373,16 @@ export function createApp(options: AppOptions): RequestListener {
    */
   async function spend<T>(
     who: Caller,
+    provider: AiProvider,
     start: AiLogStart,
     budgetKey: string,
     worstCaseTokens: number,
     run: (onUsage: (u: TokenUsage) => void) => Promise<T>,
   ): Promise<T> {
-    let settle: (tokens: number) => void;
+    let settle: (tokens: number, giveBack?: boolean) => void;
     try {
+      // A paused provider is not called, and the refusal uses up neither the daily cap nor the course budget.
+      assertAvailable(provider);
       // The daily cap is checked first so a refusal there does not use up the course budget.
       countAiCall(who);
       try {
@@ -353,7 +397,17 @@ export function createApp(options: AppOptions): RequestListener {
       if (err instanceof HttpError) platform?.logAiOutcome(start, { refused: err.code, message: err.message });
       throw err;
     }
-    return tracked(start, run, (tokens) => settle(tokens));
+    // An outage answer did no work, so the course gets its request back. Any tokens that were reported are still kept.
+    let outage = false;
+    return tracked(
+      start,
+      (onUsage) =>
+        watched(provider, () => run(onUsage)).catch((err: unknown) => {
+          outage = isOutage(err);
+          throw err;
+        }),
+      (tokens) => settle(tokens, outage && tokens === 0),
+    );
   }
 
   async function handleGenerate(req: IncomingMessage, user: UserRow | undefined): Promise<GenerateResponse> {
@@ -373,8 +427,9 @@ export function createApp(options: AppOptions): RequestListener {
 
     let pending = inFlight.get(key);
     if (!pending) {
+      assertAvailable(provider);
       countAiCall(who);
-      pending = tracked(start, () => generateCourse(document, provider)).finally(() => inFlight.delete(key));
+      pending = tracked(start, () => watched(provider, () => generateCourse(document, provider))).finally(() => inFlight.delete(key));
       inFlight.set(key, pending);
     }
     const course = await pending;
@@ -413,7 +468,7 @@ export function createApp(options: AppOptions): RequestListener {
     let pending = plansInFlight.get(flight);
     if (!pending) {
       const worstCase = estimateTokens(Math.min(chars, PLAN_CHAR_BUDGET) + PROMPT_OVERHEAD_CHARS) + planMaxTokens;
-      pending = spend(who, start, budgetKey, worstCase, (onUsage) =>
+      pending = spend(who, provider, start, budgetKey, worstCase, (onUsage) =>
         createPlan(document, provider, { maxLessons: lessons, maxTokens: planMaxTokens, onUsage }),
       )
         .then((r) => r.plan)
@@ -472,7 +527,7 @@ export function createApp(options: AppOptions): RequestListener {
     let pending = lessonsInFlight.get(flight);
     if (!pending) {
       const worstCase = estimateTokens(Math.min(chars, LESSON_CHAR_BUDGET) + PROMPT_OVERHEAD_CHARS) + lessonMaxTokens;
-      pending = spend(who, start, budgetKey, worstCase, (onUsage) =>
+      pending = spend(who, provider, start, budgetKey, worstCase, (onUsage) =>
         createLesson(input, provider, { maxTokens: lessonMaxTokens, onUsage }),
       ).finally(() => lessonsInFlight.delete(flight));
       lessonsInFlight.set(flight, pending);
@@ -516,7 +571,14 @@ export function createApp(options: AppOptions): RequestListener {
       if (method === 'GET' && path === '/api/health') {
         status = 200;
         const provider = activeProvider();
-        const body: HealthResponse = { ok: true, provider: provider.id, model: provider.model, ...(platform ? { accounts: true } : {}) };
+        const paused = availability.waitSec(providerKey(provider));
+        const body: HealthResponse = {
+          ok: true,
+          provider: provider.id,
+          model: provider.model,
+          ...(platform ? { accounts: true } : {}),
+          ...(paused ? { providerRetryAfterSec: paused } : {}),
+        };
         send(res, 200, body, cors);
         return;
       }
@@ -560,9 +622,11 @@ export function createApp(options: AppOptions): RequestListener {
       if (err instanceof HttpError) error = err;
       else if (err instanceof ProviderError) {
         error =
-          err.code === 'rate_limited'
-            ? new HttpError(503, 'provider_rate_limited', err.message)
-            : err.code === 'not_configured'
+          err.code === 'unavailable'
+            ? outageError(err.retryAfterSec ?? 30)
+            : err.code === 'rate_limited'
+              ? new HttpError(503, 'provider_rate_limited', err.message)
+              : err.code === 'not_configured'
               ? new HttpError(503, 'provider_not_configured', 'The AI provider is not set up on the server.')
               : new HttpError(502, 'provider_error', err.message);
       } else if (err instanceof GenerationError) {

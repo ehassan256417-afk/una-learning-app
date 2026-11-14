@@ -14,6 +14,7 @@ import type { PlanResponse } from '../lib/learning/contracts.ts';
 import { createApp, type AppOptions } from '../server/app.ts';
 import { Platform, type PlatformOptions } from '../server/platform.ts';
 import { MockProvider } from '../server/providers/mock.ts';
+import { ProviderError } from '../server/providers/types.ts';
 import { expect } from './helpers/expect.ts';
 import { extractSample } from './helpers/samples.ts';
 
@@ -528,6 +529,37 @@ describe('AI requests with accounts', () => {
     const ai = (await call<AdminAi>('GET', '/api/admin/ai', { token: owner.token })).body;
     expect(ai.totals).toMatchObject({ requests: 1, ok: 0, failed: 1 });
     expect(ai.failures[0]).toMatchObject({ status: 'failed', model: 'broken' });
+  });
+
+  it('logs a provider outage once, then refuses without calling the provider or counting the request', async () => {
+    const down = {
+      id: 'zro',
+      model: 'm',
+      calls: 0,
+      generate: () => {
+        down.calls++;
+        return Promise.reject(new ProviderError('unavailable', 'The AI provider is temporarily unavailable (HTTP 503).'));
+      },
+    };
+    const { call, register, registerOwner } = await start({ provider: down });
+    const sam = await register('sam@example.com');
+    const body = await planBody();
+
+    const first = await call('POST', '/api/lessons/plan', { token: sam.token, body });
+    expect(first.status).toBe(503);
+    expect(errorCode(first)).toBe('provider_unavailable');
+    const second = await call('POST', '/api/lessons/plan', { token: sam.token, body });
+    expect(second.status).toBe(503);
+    expect(errorCode(second)).toBe('provider_unavailable');
+    expect(down.calls).toBe(1);
+
+    const owner = await registerOwner();
+    const ai = (await call<AdminAi>('GET', '/api/admin/ai', { token: owner.token })).body;
+    // One real attempt, with the upstream status kept for the owner; the second click is a refusal and is not counted.
+    expect(ai.totals).toMatchObject({ requests: 1, ok: 0, failed: 1, refused: 1 });
+    expect(ai.today.requests).toBe(1);
+    expect(ai.failures.map((f) => `${f.status} ${f.errorCode}`).sort()).toEqual(['failed provider_unavailable', 'refused provider_unavailable']);
+    expect(ai.totals.promptTokens).toBe(0);
   });
 
   it('switches generation off from the settings', async () => {

@@ -89,6 +89,8 @@ export type ApiErrorCode =
   | 'rate_limited'
   | 'provider_not_configured'
   | 'provider_rate_limited'
+  /** The AI provider answered with a server error. Nothing was generated and no AI credits were used. */
+  | 'provider_unavailable'
   | 'provider_error'
   | 'invalid_ai_output'
   | 'nothing_grounded'
@@ -105,4 +107,6 @@ export interface HealthResponse {
   model: string;
   /** True when this backend has accounts, so lesson requests need a signed-in student. */
   accounts?: boolean;
+  /** Set while the AI provider is paused after an outage: seconds until lessons can be requested again. */
+  providerRetryAfterSec?: number;
 }

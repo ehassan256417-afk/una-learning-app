@@ -79,9 +79,11 @@ export class CourseBudgets {
   /**
    * Claims one request and its worst-case tokens, or throws without changing
    * anything. Call the returned function exactly once with the tokens really
-   * used (0 if the provider never reported any).
+   * used (0 if the provider never reported any). Pass `giveBack` when the
+   * provider turned the request away without doing any work (an outage), so the
+   * request does not count against the course.
    */
-  begin(key: string, worstCaseTokens: number): (actualTokens: number) => void {
+  begin(key: string, worstCaseTokens: number): (actualTokens: number, giveBack?: boolean) => void {
     const e = this.entry(key);
     if (e.requests >= this.limits.maxRequests) {
       throw new BudgetError(
@@ -96,10 +98,11 @@ export class CourseBudgets {
     e.requests++;
     e.reserved += worstCaseTokens;
     let settled = false;
-    return (actualTokens: number) => {
+    return (actualTokens: number, giveBack = false) => {
       if (settled) return;
       settled = true;
       e.reserved = Math.max(0, e.reserved - worstCaseTokens);
+      if (giveBack) e.requests = Math.max(0, e.requests - 1);
       // A count that is not a usable number is charged as the worst case, never as zero or NaN.
       e.tokens += Number.isFinite(actualTokens) ? Math.max(0, Math.round(actualTokens)) : worstCaseTokens;
     };

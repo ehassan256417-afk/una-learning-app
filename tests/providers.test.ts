@@ -237,8 +237,25 @@ describe('ZroProvider', () => {
   it('reports server errors, empty answers and cut-off answers', async () => {
     const server = new ZroProvider({ apiKey: 'k', fetchImpl: fakeFetch(503, { error: { message: 'busy sk-x', type: 'upstream' } }).impl });
     const err = await server.generate(request).catch((e: unknown) => e as ProviderError);
-    expect(err).toMatchObject({ code: 'failed' });
+    // A 5xx answer means the provider did no work: it is reported apart from a bad or cut-off answer.
+    expect(err).toMatchObject({ code: 'unavailable' });
+    expect((err as ProviderError).message).toContain('HTTP 503');
     expect((err as ProviderError).message).not.toContain('busy');
+    expect((err as ProviderError).retryAfterSec).toBeUndefined();
+
+    for (const status of [500, 502, 504, 524]) {
+      const down = new ZroProvider({ apiKey: 'k', fetchImpl: fakeFetch(status, { error: { message: 'Request failed.' } }).impl });
+      await expect(down.generate(request)).rejects.toMatchObject({ code: 'unavailable' });
+    }
+    const asked = (async () =>
+      new Response('{}', { status: 503, headers: { 'content-type': 'application/json', 'retry-after': '120' } })) as unknown as typeof fetch;
+    await expect(new ZroProvider({ apiKey: 'k', fetchImpl: asked }).generate(request)).rejects.toMatchObject({
+      code: 'unavailable',
+      retryAfterSec: 120,
+    });
+    // A request the provider refused as malformed is not an outage.
+    const bad = new ZroProvider({ apiKey: 'k', fetchImpl: fakeFetch(400, { error: { message: 'bad' } }).impl });
+    await expect(bad.generate(request)).rejects.toMatchObject({ code: 'failed' });
 
     const empty = new ZroProvider({ apiKey: 'k', fetchImpl: fakeFetch(200, chat(null)).impl });
     await expect(empty.generate(request)).rejects.toMatchObject({ code: 'failed' });
@@ -295,7 +312,9 @@ describe('GeminiProvider', () => {
 
   it('reports other HTTP failures, blocked prompts and cut-off answers', async () => {
     const server = new GeminiProvider({ apiKey: 'k', fetchImpl: fakeFetch(500, {}).impl });
-    await expect(server.generate(request)).rejects.toMatchObject({ code: 'failed' });
+    await expect(server.generate(request)).rejects.toMatchObject({ code: 'unavailable' });
+    const refused = new GeminiProvider({ apiKey: 'k', fetchImpl: fakeFetch(400, {}).impl });
+    await expect(refused.generate(request)).rejects.toMatchObject({ code: 'failed' });
 
     const blocked = new GeminiProvider({ apiKey: 'k', fetchImpl: fakeFetch(200, { promptFeedback: { blockReason: 'SAFETY' } }).impl });
     await expect(blocked.generate(request)).rejects.toMatchObject({ code: 'failed' });

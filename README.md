@@ -87,7 +87,7 @@ Not measured: visitors who are not signed in and whose browser sends Do Not Trac
 **Settings the owner can change without touching code:** who may register (open, invite only, closed) and invite codes; AI limits per student, per day and per course; the model name and prices; feature switches (lesson generation, PowerPoint upload, spaced review, sample courses); a site-wide announcement; the tagline and support email on the landing page; review session size and the daily XP goal.
 
 ```bash
-npm test           # 246 tests, Node's built-in runner
+npm test           # 257 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```
@@ -169,6 +169,8 @@ The browser runs the loop (`lib/learning/adaptive.ts`) and saves the course afte
 | `LESSON_MAX_TOKENS` | 6000 | Output cap of one lesson request |
 
 These `.env` values are only the starting point: once the owner saves settings in the dashboard, the dashboard values apply. Plans and lessons are cached in memory for 24 hours, and the daily caps still apply. The per-course budget is tied to the signed-in student. Its counters are in memory, so a restart resets a course's budget (the daily limits are in the database and do not reset). A failed request that reports no usage is counted as a request but as 0 tokens.
+
+**When the AI provider is down.** A 5xx answer from the provider (for example ZRO returning HTTP 503 "Request failed.") means it did no work and the document is not the cause. The backend answers `503 provider_unavailable` with a `Retry-After` header, gives the course its request back, and pauses that provider and model: 30 seconds, then 60, 120 and 300 if the outage repeats (a longer `Retry-After` from the provider is followed, up to 15 minutes). Requests during the pause are refused without calling the provider and are not counted against any limit. Nothing is sent again on its own: the next attempt is the student's, and the first success clears the pause. The attempt that met the outage stays in the AI log (`provider_unavailable`, with the upstream status) and in the daily count. `GET /api/health` shows `providerRetryAfterSec` while a pause is active, and the server log has a `provider <id> unavailable` line. The pause is in memory, so a restart clears it.
 
 The older single-request endpoint (`POST /api/lessons/generate`) still exists for the validation script; the app no longer uses it.
 
