@@ -10,7 +10,7 @@ import {
 import { AccountError, PASSWORD_MAX, PASSWORD_MIN, toAccountUser, type UserRow } from './accounts.ts';
 import { HttpError, readJsonBody } from './http.ts';
 import { courseSchema, progressSchema, settingsSchema, type Platform } from './platform.ts';
-import { RateLimiter } from './security.ts';
+import { FailureLimiter, RateLimiter } from './security.ts';
 
 /**
  * HTTP endpoints of the platform: accounts, a student's synced data, activity
@@ -74,7 +74,7 @@ const batchSchema = z.object({
         value: z.number().min(0).max(1_000_000).optional(),
       }),
     )
-    .max(60),
+    .max(30),
 });
 const userPatchSchema = z
   .object({ status: z.enum(['active', 'suspended']).optional(), beta: z.boolean().optional(), note: z.string().trim().max(500).optional() })
@@ -108,8 +108,13 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
   // Sign-in attempts are limited per address and per account, so neither one address
   // guessing many accounts nor many addresses guessing one account gets far.
   const authByClient = new RateLimiter(30, 10 * 60_000);
-  const authByEmail = new RateLimiter(8, 15 * 60_000);
-  const eventsByClient = new RateLimiter(600, 10 * 60_000);
+  // Only failures count, so signing in normally never locks anyone out. One address gets 8 wrong
+  // guesses per account; the wider per-account cap stops many addresses guessing one account.
+  const guessesHere = new FailureLimiter(8, 15 * 60_000);
+  const guessesAnywhere = new FailureLimiter(40, 15 * 60_000);
+  // Activity reports: a browser sends one every 30 seconds at most, plus one per page opened.
+  const eventsByClient = new RateLimiter(90, 10 * 60_000);
+  const eventsByUser = new RateLimiter(240, 10 * 60_000);
   const dataByUser = new RateLimiter(900, 10 * 60_000);
 
   const limit = (gate: RateLimiter, key: string) => {
@@ -120,6 +125,28 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
       });
     }
   };
+
+  /** Runs a password or code check with guess limits. A correct answer clears this address's count. */
+  async function guarded<T>(emailKey: string, client: string, work: () => Promise<T>): Promise<T> {
+    const here = `${emailKey}|${client}`;
+    const wait = Math.max(guessesHere.blockedFor(here), guessesAnywhere.blockedFor(emailKey));
+    if (wait > 0) {
+      throw new HttpError(429, 'rate_limited', `Too many wrong attempts. Try again in ${Math.ceil(wait / 60)} minutes.`, {
+        'retry-after': String(wait),
+      });
+    }
+    try {
+      const result = await work();
+      guessesHere.clear(here);
+      return result;
+    } catch (err) {
+      if (err instanceof AccountError && (err.code === 'invalid_credentials' || err.code === 'invalid_reset')) {
+        guessesHere.fail(here);
+        guessesAnywhere.fail(emailKey);
+      }
+      throw err;
+    }
+  }
 
   const signedIn = (ctx: RouteContext): UserRow => {
     if (!ctx.user) throw new HttpError(401, 'unauthorized', 'Sign in to continue.');
@@ -159,8 +186,7 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
     if (action === 'login') {
       limit(authByClient, ctx.client);
       const body = parse(loginSchema, await readJsonBody(req, SMALL), 'Enter your email and password.');
-      limit(authByEmail, body.email);
-      const user = await accounts.authenticate(body.email, body.password);
+      const user = await guarded(body.email, ctx.client, () => accounts.authenticate(body.email, body.password));
       accounts.recordLogin(user.id);
       platform.recordEvent('login', user.id, body.visitorId ?? '');
       return { status: 200, body: session(user) };
@@ -168,8 +194,7 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
     if (action === 'reset') {
       limit(authByClient, ctx.client);
       const body = parse(resetSchema, await readJsonBody(req, SMALL), 'Enter your email, the reset code and a new password of at least 8 characters.');
-      limit(authByEmail, body.email);
-      const user = await accounts.resetPassword(body.email, body.code, body.password);
+      const user = await guarded(body.email, ctx.client, () => accounts.resetPassword(body.email, body.code, body.password));
       return { status: 200, body: session(user) };
     }
     if (action === 'logout') {
@@ -178,9 +203,8 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
     }
     if (action === 'password') {
       const user = signedIn(ctx);
-      limit(authByEmail, user.email);
       const body = parse(passwordSchema, await readJsonBody(req, SMALL), 'The new password needs at least 8 characters.');
-      await accounts.authenticate(user.email, body.current);
+      await guarded(user.email, ctx.client, () => accounts.authenticate(user.email, body.current));
       await accounts.setPassword(user.id, body.next);
       // Every other device is signed out; this one stays.
       accounts.revokeSessions(user.id, ctx.token);
@@ -199,7 +223,7 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
     if (!area && method === 'DELETE') {
       const body = parse(z.object({ password: z.string().min(1).max(PASSWORD_MAX) }), await readJsonBody(req, SMALL));
       if (user.role === 'owner') throw new HttpError(403, 'forbidden', 'The owner account cannot be deleted from the app.');
-      await accounts.authenticate(user.email, body.password);
+      await guarded(user.email, ctx.client, () => accounts.authenticate(user.email, body.password));
       accounts.deleteUser(user.id);
       return { status: 200, body: { ok: true } };
     }
@@ -229,6 +253,7 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
         const result = platform.putCourse(user.id, course, JSON.stringify(course));
         if (result.ok) return { status: 200, body: { updatedAt: result.updatedAt } };
         if (result.reason === 'hidden') throw new HttpError(403, 'forbidden', 'This course was taken offline by the site owner.');
+        if (result.reason === 'storage') throw new HttpError(409, 'limit_reached', 'Your account storage is full. Delete a course to save another.');
         throw new HttpError(409, 'limit_reached', `Your account can hold ${platform.settings().limits.maxCoursesPerUser} courses. Delete one to save another.`);
       }
       if (method === 'DELETE') {
@@ -321,7 +346,7 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
         return ok({ ok: true });
       }
       if (method === 'DELETE') {
-        if (!platform.deleteCourse(target.id, b)) throw new HttpError(404, 'not_found', 'No such course.');
+        if (!platform.deleteCourse(target.id, b, true)) throw new HttpError(404, 'not_found', 'No such course.');
         platform.audit(actor, 'course.delete', `${target.email} / ${b}`);
         return ok({ ok: true });
       }
@@ -383,7 +408,8 @@ export function createPlatformRoutes(platform: Platform, deps: RouteDeps) {
       if (area === 'me') return await me(ctx, rest);
       if (area === 'admin') return await admin(ctx, rest);
       if (area === 'events' && ctx.method === 'POST' && rest.length === 0) {
-        limit(eventsByClient, ctx.user?.id ?? ctx.client);
+        if (ctx.user) limit(eventsByUser, ctx.user.id);
+        else limit(eventsByClient, ctx.client);
         const batch = parse(batchSchema, await readJsonBody(ctx.req, SMALL));
         platform.ingest(batch, ctx.user?.id ?? null);
         return { status: 202, body: { ok: true } };

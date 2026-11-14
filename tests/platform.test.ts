@@ -214,6 +214,127 @@ describe('accounts', () => {
   });
 });
 
+describe('hardening', () => {
+  it('never locks an account because of successful sign-ins, and forgives earlier mistakes after one', async () => {
+    const { call, register } = await start();
+    await register('sam@example.com');
+    const login = (password: string) => call('POST', '/api/auth/login', { body: { email: 'sam@example.com', password } });
+    for (let i = 0; i < 12; i++) expect((await login(PASSWORD)).status).toBe(200);
+    for (let i = 0; i < 5; i++) expect((await login('a wrong guess')).status).toBe(401);
+    expect((await login(PASSWORD)).status).toBe(200);
+    // The count started again, so eight more mistakes are allowed before the block.
+    for (let i = 0; i < 8; i++) expect((await login('a wrong guess')).status).toBe(401);
+    expect((await login(PASSWORD)).status).toBe(429);
+  });
+
+  it('limits password guesses on change-password and delete-account too', async () => {
+    const { call, register } = await start();
+    const { token } = await register('sam@example.com');
+    for (let i = 0; i < 8; i++) {
+      expect((await call('DELETE', '/api/me', { token, body: { password: `guess ${i} wrong` } })).status).toBe(401);
+    }
+    expect((await call('DELETE', '/api/me', { token, body: { password: PASSWORD } })).status).toBe(429);
+    expect((await call('POST', '/api/auth/password', { token, body: { current: PASSWORD, next: 'another password 1' } })).status).toBe(429);
+    expect((await call('GET', '/api/me', { token })).status).toBe(200);
+  });
+
+  it('says nothing about the setup code once the owner exists', async () => {
+    const { call, registerOwner } = await start();
+    await registerOwner();
+    const body = { email: OWNER, name: 'Me', password: PASSWORD };
+    const wrong = await call('POST', '/api/auth/register', { body: { ...body, inviteCode: 'a wrong guess' } });
+    const right = await call('POST', '/api/auth/register', { body: { ...body, inviteCode: SETUP } });
+    expect(wrong.status).toBe(409);
+    expect(wrong.body).toEqual(right.body);
+  });
+
+  it('ignores a setup code that is too short to be safe', async () => {
+    const { call } = await start({}, { ownerSetupCode: 'short' });
+    const r = await call('POST', '/api/auth/register', { body: { email: OWNER, name: 'Me', password: PASSWORD, inviteCode: 'short' } });
+    expect(r.status).toBe(403);
+  });
+
+  it('does not reopen a suspended account with a reset code', async () => {
+    const { call, register, registerOwner, platform } = await start();
+    const sam = await register('sam@example.com');
+    const owner = await registerOwner();
+    const made = await call<{ code: string }>('POST', `/api/admin/users/${sam.user.id}/reset-code`, { token: owner.token });
+    await call('PATCH', `/api/admin/users/${sam.user.id}`, { token: owner.token, body: { status: 'suspended' } });
+    const before = platform.accounts.byId(sam.user.id)!.pw_hash;
+    const r = await call('POST', '/api/auth/reset', { body: { email: 'sam@example.com', code: made.body.code, password: 'my new password 1' } });
+    expect(r.status).toBe(400);
+    expect(platform.accounts.byId(sam.user.id)!.pw_hash).toBe(before);
+  });
+
+  it('keeps a course the owner took offline when the student tries to delete it', async () => {
+    const { call, register, registerOwner, platform } = await start();
+    const sam = await register('sam@example.com');
+    await call('PUT', '/api/me/courses/c1', { token: sam.token, body: { course: course('c1') } });
+    const owner = await registerOwner();
+    await call('PATCH', `/api/admin/courses/${sam.user.id}/c1`, { token: owner.token, body: { hidden: true, reason: 'Check' } });
+    await call('DELETE', '/api/me/courses/c1', { token: sam.token });
+    expect(platform.listAllCourses({ state: 'hidden' })).toHaveLength(1);
+    // The owner can remove it.
+    expect((await call('DELETE', `/api/admin/courses/${sam.user.id}/c1`, { token: owner.token })).status).toBe(200);
+    expect(platform.listAllCourses({})).toHaveLength(0);
+  });
+
+  it('keeps at most ten devices signed in per account', async () => {
+    const { call, register, clock, platform } = await start();
+    const first = await register('sam@example.com');
+    for (let i = 0; i < 11; i++) {
+      clock.t += 1000;
+      await call('POST', '/api/auth/login', { body: { email: 'sam@example.com', password: PASSWORD } });
+    }
+    expect((platform.db.prepare('SELECT COUNT(*) AS n FROM auth_sessions').get() as { n: number }).n).toBe(10);
+    expect((await call('GET', '/api/me', { token: first.token })).status).toBe(401);
+  });
+
+  it('caps how many visits one browser can open in a day, and how much time a day can hold', async () => {
+    const { call, register, clock, platform } = await start();
+    const { token } = await register('sam@example.com');
+    const visit = (n: number) => `visit-${String(n).padStart(14, '0')}`;
+    for (let i = 0; i < 45; i++) {
+      await call('POST', '/api/events', { token, body: { visitorId: VISITOR, visitId: visit(i), activeMs: 15_000, studyMs: 0, events: [{ type: 'page_view', path: '/' }] } });
+    }
+    const count = (table: string) => (platform.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    expect(count('visits')).toBe(40);
+    expect(count('events')).toBe(41);
+    // Three tabs each reporting ten minutes every ten minutes for eight hours would be 25 hours:
+    // a day never holds more than sixteen.
+    for (let i = 0; i < 50; i++) {
+      clock.t += 10 * 60_000;
+      for (const v of [0, 1, 2]) {
+        await call('POST', '/api/events', { token, body: { visitorId: VISITOR, visitId: visit(v), activeMs: 600_000, studyMs: 0, events: [] } });
+      }
+    }
+    const held = platform.db.prepare('SELECT MAX(active_ms) AS n FROM activity').get() as { n: number };
+    expect(held.n).toBe(16 * 60 * 60_000);
+  });
+
+  it('deletes activity past the retention period and keeps accounts', async () => {
+    const { call, register, clock, platform } = await start();
+    await register('sam@example.com');
+    await call('POST', '/api/events', { body: { visitorId: VISITOR, visitId: VISIT, activeMs: 5_000, studyMs: 0, events: [{ type: 'page_view', path: '/' }] } });
+    clock.t += 401 * 86_400_000;
+    platform.prune();
+    const count = (table: string) => (platform.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    expect([count('events'), count('visits'), count('activity')]).toEqual([0, 0, 0]);
+    expect(count('users')).toBe(1);
+  });
+
+  it('accepts only a plain address as the public support email', async () => {
+    const { call, registerOwner } = await start();
+    const owner = await registerOwner();
+    const settings = (await call<{ settings: PlatformSettings }>('GET', '/api/admin/settings', { token: owner.token })).body.settings;
+    const put = (supportEmail: string) =>
+      call('PUT', '/api/admin/settings', { token: owner.token, body: { settings: { ...settings, site: { ...settings.site, supportEmail } } } });
+    expect((await put('help@example.com?cc=other@example.com')).status).toBe(400);
+    expect((await put('help@example.com')).status).toBe(200);
+    expect((await put('')).status).toBe(200);
+  });
+});
+
 describe('registration modes and invites', () => {
   it('needs a valid invite in invite mode and marks the account as a beta tester', async () => {
     const { call, registerOwner, register } = await start({}, { defaults: { registrationMode: 'invite' } });
@@ -466,18 +587,18 @@ describe('measured activity', () => {
   it('never credits more active time than really passed', async () => {
     const { call, register, clock, platform } = await start();
     const sam = await register('sam@example.com');
-    // A first batch claims an hour; a new visit can hold at most one minute.
+    // A first batch claims an hour; a new visit can hold at most fifteen seconds.
     await call('POST', '/api/events', { token: sam.token, body: batch({ activeMs: 3_600_000, studyMs: 3_600_000 }) });
     let visit = platform.db.prepare('SELECT active_ms, study_ms FROM visits WHERE id = ?').get(VISIT) as { active_ms: number; study_ms: number };
-    expect(visit.active_ms).toBe(60_000);
+    expect(visit.active_ms).toBe(15_000);
     // Thirty seconds later it claims ten minutes; only the elapsed time (plus a little slack) counts.
     clock.t += 30_000;
     await call('POST', '/api/events', { token: sam.token, body: batch({ activeMs: 600_000, studyMs: 900_000, events: [] }) });
     visit = platform.db.prepare('SELECT active_ms, study_ms FROM visits WHERE id = ?').get(VISIT) as { active_ms: number; study_ms: number };
-    expect(visit.active_ms).toBe(60_000 + 35_000);
-    expect(visit.study_ms).toBe(60_000 + 35_000);
+    expect(visit.active_ms).toBe(15_000 + 35_000);
+    expect(visit.study_ms).toBe(15_000 + 35_000);
     const stats = (await call<MyStats>('GET', '/api/me/stats', { token: sam.token })).body;
-    expect(stats.totalActiveMin).toBe(1.6);
+    expect(stats.totalActiveMin).toBe(0.8);
     expect(stats.sessions).toBe(1);
   });
 
@@ -514,7 +635,7 @@ describe('owner dashboard', () => {
     await call('PUT', '/api/me/courses/c1', { token: sam.token, body: { course: course('c1') } });
     await call('POST', '/api/events', {
       token: sam.token,
-      body: { visitorId: VISITOR, visitId: VISIT, activeMs: 40_000, studyMs: 30_000, events: [{ type: 'lesson_started', path: '/my/lesson' }] },
+      body: { visitorId: VISITOR, visitId: VISIT, activeMs: 12_000, studyMs: 6_000, events: [{ type: 'lesson_started', path: '/my/lesson' }] },
     });
     const owner = await registerOwner();
 
@@ -524,7 +645,7 @@ describe('owner dashboard', () => {
 
     const d = (await call<AdminUserDetail>('GET', `/api/admin/users/${sam.user.id}`, { token: owner.token })).body;
     expect(d.learning).toMatchObject({ xp: 30, lessonsStarted: 1, lessonsCompleted: 1, quizCorrect: 2, quizTotal: 3, itemsTracked: 2, weak: 1, strong: 1 });
-    expect(d).toMatchObject({ visits: 1, activeMin: 0.7, studyMin: 0.5, signedInDevices: 1 });
+    expect(d).toMatchObject({ visits: 1, activeMin: 0.2, studyMin: 0.1, signedInDevices: 1 });
     expect(d.courseList[0]).toMatchObject({ title: 'Cell biology', documentName: 'cells.pdf', lessonsReady: 1 });
     expect(d.daily).toHaveLength(30);
     // The owner sees numbers and titles, not the lessons themselves.

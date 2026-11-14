@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import type {
@@ -35,6 +35,25 @@ import { dayOf, inTransaction, openDb, type Db } from './db.ts';
  */
 
 const DAY_MS = 86_400_000;
+
+/*
+ * Bounds on what browsers can make the platform store. Activity reports need no
+ * sign-in, so every one of them has a ceiling: without these a script could fill
+ * the disk that also holds the students' accounts, or report hours of fake study.
+ */
+/** Activity older than this is deleted. The dashboard looks back 365 days at most. */
+const RETENTION_DAYS = 400;
+/** Time a brand-new visit may claim in its first report. */
+const NEW_VISIT_WINDOW_MS = 15_000;
+const MAX_VISITS_PER_VISITOR_DAY = 40;
+const MAX_EVENTS_PER_VISITOR_DAY = 3_000;
+/** Active time one account (or one anonymous browser) can hold for a single day. */
+const MAX_ACTIVE_MS_PER_DAY = 16 * 60 * 60_000;
+/** Event rows accepted per day from visitors who are not signed in, across the whole site. */
+const MAX_ANONYMOUS_EVENTS_PER_DAY = 60_000;
+/** Bytes of courses one account may store. */
+const MAX_COURSE_BYTES_PER_USER = 30_000_000;
+const BACKUPS_KEPT = 14;
 const int = (min: number, max: number) => z.number().int().min(min).max(max);
 
 export const settingsSchema = z
@@ -60,7 +79,17 @@ export const settingsSchema = z
         outputPricePerMTok: z.number().min(0).max(1000),
       })
       .strict(),
-    site: z.object({ tagline: z.string().trim().max(160), supportEmail: z.string().trim().max(120) }).strict(),
+    site: z
+      .object({
+        tagline: z.string().trim().max(160),
+        // Empty, or a plain address: it becomes a mailto link on the public page.
+        supportEmail: z
+          .string()
+          .trim()
+          .max(120)
+          .regex(/^$|^[^\s@?&#]+@[^\s@?&#]+\.[^\s@?&#]+$/),
+      })
+      .strict(),
     learning: z.object({ reviewSessionSize: int(5, 50), dailyGoalXp: int(10, 1000) }).strict(),
   })
   .strict();
@@ -156,6 +185,8 @@ export class Platform {
   private defaults: PlatformSettings;
   private cachedSettings: PlatformSettings | null = null;
   private lastBackup: { file: string; at: number } | null = null;
+  private anonymous = { day: '', events: 0 };
+  private prunedDay = '';
 
   constructor(options: PlatformOptions) {
     this.dbPath = options.dbPath;
@@ -178,6 +209,17 @@ export class Platform {
     this.db
       .prepare("UPDATE ai_requests SET status = 'failed', error_code = 'interrupted', error_message = 'The server stopped during this request.' WHERE status = 'running'")
       .run();
+    this.prune();
+  }
+
+  /** Deletes activity and AI log rows past the retention period. Runs at start and once per day. */
+  prune() {
+    const t = this.now();
+    this.prunedDay = dayOf(t);
+    const cutoff = dayOf(t - RETENTION_DAYS * DAY_MS);
+    for (const table of ['events', 'visits', 'activity', 'ai_requests']) {
+      this.db.prepare(`DELETE FROM ${table} WHERE day < ?`).run(cutoff);
+    }
   }
 
   close() {
@@ -262,7 +304,11 @@ export class Platform {
     return row ? { json: row.json, updatedAt: row.updated_at } : undefined;
   }
 
-  putCourse(userId: string, course: z.infer<typeof courseSchema>, json: string): { ok: true; updatedAt: number } | { ok: false; reason: 'limit' | 'hidden' } {
+  putCourse(
+    userId: string,
+    course: z.infer<typeof courseSchema>,
+    json: string,
+  ): { ok: true; updatedAt: number } | { ok: false; reason: 'limit' | 'hidden' | 'storage' } {
     return inTransaction(this.db, () => {
       const existing = this.db.prepare('SELECT deleted_at, hidden_reason, created_at FROM courses WHERE user_id = ? AND id = ?').get(userId, course.id) as
         | { deleted_at: number | null; hidden_reason: string | null; created_at: number }
@@ -273,6 +319,8 @@ export class Platform {
         const count = (this.db.prepare('SELECT COUNT(*) AS n FROM courses WHERE user_id = ? AND deleted_at IS NULL').get(userId) as { n: number }).n;
         if (count >= this.settings().limits.maxCoursesPerUser) return { ok: false as const, reason: 'limit' as const };
       }
+      const others = (this.db.prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM courses WHERE user_id = ? AND id <> ?').get(userId, course.id) as { n: number }).n;
+      if (others + Buffer.byteLength(json) > MAX_COURSE_BYTES_PER_USER) return { ok: false as const, reason: 'storage' as const };
       const t = this.now();
       const failed = (course.lessonStates ?? []).filter((s) => s.status === 'failed').length;
       this.db
@@ -301,11 +349,15 @@ export class Platform {
     });
   }
 
-  /** Removes a course's content and leaves a marker, so the student's other devices drop it too. */
-  deleteCourse(userId: string, id: string): boolean {
+  /**
+   * Deletes a course. The student's other devices drop it at their next sync because it is no longer
+   * in the account's list. A student cannot delete a course the owner took offline: that one is kept
+   * for the owner to look at, and only the owner can remove it (`includeHidden`).
+   */
+  deleteCourse(userId: string, id: string, includeHidden = false): boolean {
     const result = this.db
-      .prepare("UPDATE courses SET deleted_at = ?, json = '', bytes = 0, updated_at = ? WHERE user_id = ? AND id = ? AND deleted_at IS NULL")
-      .run(this.now(), this.now(), userId, id);
+      .prepare(`DELETE FROM courses WHERE user_id = ? AND id = ?${includeHidden ? '' : ' AND hidden_reason IS NULL'}`)
+      .run(userId, id);
     return result.changes === 1;
   }
 
@@ -363,15 +415,29 @@ export class Platform {
   ingest(batch: ActivityBatch, userId: string | null) {
     const t = this.now();
     const day = dayOf(t);
+    if (day !== this.prunedDay) this.prune();
+    if (this.anonymous.day !== day) this.anonymous = { day, events: 0 };
+    // Past the daily ceiling, reports from visitors who are not signed in are dropped: statistics for the
+    // rest of that day undercount, and the database stays a safe size.
+    if (!userId && this.anonymous.events >= MAX_ANONYMOUS_EVENTS_PER_DAY) return;
     inTransaction(this.db, () => {
       const visit = this.db.prepare('SELECT visitor_id, last_at FROM visits WHERE id = ?').get(batch.visitId) as
         | { visitor_id: string; last_at: number }
         | undefined;
       // A visit id belongs to the browser that created it.
       if (visit && visit.visitor_id !== batch.visitorId) return;
-      const views = batch.events.filter((e) => e.type === 'page_view');
-      const window = visit ? Math.min(t - visit.last_at + 5_000, 10 * 60_000) : 60_000;
-      const active = Math.max(0, Math.min(Math.round(batch.activeMs), window));
+      const count = (sql: string) => (this.db.prepare(sql).get(batch.visitorId, day) as { n: number }).n;
+      if (!visit && count('SELECT COUNT(*) AS n FROM visits WHERE visitor_id = ? AND day = ?') >= MAX_VISITS_PER_VISITOR_DAY) return;
+      const room = MAX_EVENTS_PER_VISITOR_DAY - count('SELECT COUNT(*) AS n FROM events WHERE visitor_id = ? AND day = ?');
+      const events = batch.events.slice(0, Math.max(0, room));
+      if (!userId) this.anonymous.events += Math.max(1, events.length);
+      const views = events.filter((e) => e.type === 'page_view');
+      const window = visit ? Math.min(t - visit.last_at + 5_000, 10 * 60_000) : NEW_VISIT_WINDOW_MS;
+      // Starting new visits (or new browser ids) cannot add up to more than a day can hold.
+      const held = userId
+        ? (this.db.prepare('SELECT COALESCE(SUM(active_ms), 0) AS n FROM activity WHERE user_key = ? AND day = ?').get(userId, day) as { n: number }).n
+        : (this.db.prepare("SELECT COALESCE(SUM(active_ms), 0) AS n FROM activity WHERE visitor_id = ? AND day = ? AND user_key = ''").get(batch.visitorId, day) as { n: number }).n;
+      const active = Math.max(0, Math.min(Math.round(batch.activeMs), window, MAX_ACTIVE_MS_PER_DAY - held));
       const study = Math.max(0, Math.min(Math.round(batch.studyMs), active));
       if (!visit) {
         this.db
@@ -393,7 +459,7 @@ export class Platform {
           .run(day, batch.visitorId, userId ?? '', active, study);
       }
       const insert = this.db.prepare('INSERT INTO events (ts, day, visitor_id, visit_id, user_id, type, path, prev_path, value) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-      for (const e of batch.events) {
+      for (const e of events) {
         insert.run(t, day, batch.visitorId, batch.visitId, userId, e.type, cleanPath(e.path), cleanPath(e.prev), Math.max(0, Math.min(Math.round(e.value ?? 0), 1_000_000)));
       }
     });
@@ -922,6 +988,12 @@ export class Platform {
     const at = this.now();
     const file = `una-${new Date(at).toISOString().replace(/[:.]/g, '-')}.db`;
     this.db.prepare('VACUUM INTO ?').run(join(dir, file));
+    // Each copy holds every account, so only the most recent ones are kept.
+    const old = readdirSync(dir)
+      .filter((f) => /^una-[0-9TZ-]+\.db$/.test(f))
+      .sort()
+      .slice(0, -BACKUPS_KEPT);
+    for (const f of old) unlinkSync(join(dir, f));
     this.lastBackup = { file, at };
     return this.lastBackup;
   }

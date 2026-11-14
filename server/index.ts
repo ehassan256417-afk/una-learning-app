@@ -62,6 +62,9 @@ createServer(app).listen(port, host, () => {
   console.log(`[lessons] provider: ${provider.id} (${provider.model})`);
   console.log(`[lessons] allowed origins: ${allowedOrigins.join(', ')}`);
   console.log(`[lessons] accounts: on (database in ${env.DATA_DIR || 'data'}/)`);
+  if (env.OWNER_SETUP_CODE && env.OWNER_SETUP_CODE.length < 16) {
+    console.log('[lessons] OWNER_SETUP_CODE is shorter than 16 characters and is ignored. Use a long random code.');
+  }
   if (!env.OWNER_EMAIL || !env.OWNER_SETUP_CODE) {
     console.log('[lessons] No owner yet: set OWNER_EMAIL and OWNER_SETUP_CODE in .env, then register with that email and the code.');
   }

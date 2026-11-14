@@ -16,6 +16,9 @@ const SCRYPT = { N: 16384, r: 8, p: 1, keylen: 64 };
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
 const SESSION_TOUCH_MS = 5 * 60_000;
 const RESET_TTL_MS = 60 * 60_000;
+const MAX_SESSIONS_PER_USER = 10;
+/** A setup code shorter than this is ignored: it guards the owner role and must not be guessable. */
+export const OWNER_CODE_MIN = 16;
 
 export const PASSWORD_MIN = 8;
 export const PASSWORD_MAX = 200;
@@ -115,7 +118,8 @@ export class Accounts {
   constructor(db: Db, options: AccountsOptions = {}) {
     this.db = db;
     this.ownerEmail = normalizeEmail(options.ownerEmail ?? '');
-    this.ownerSetupCode = options.ownerSetupCode ?? '';
+    const setupCode = options.ownerSetupCode ?? '';
+    this.ownerSetupCode = setupCode.length >= OWNER_CODE_MIN ? setupCode : '';
     this.now = options.now ?? Date.now;
     this.dummyHash = hashPassword(randomBytes(12).toString('hex'));
   }
@@ -138,18 +142,18 @@ export class Accounts {
     const email = normalizeEmail(input.email);
     const code = (input.inviteCode ?? '').trim();
     const isOwner = this.ownerEmail !== '' && email === this.ownerEmail;
+    // Checked first, so once the owner account exists this endpoint says nothing about the setup code.
+    if (this.byEmail(email)) throw new AccountError('email_taken', 'An account with this email already exists.');
     if (isOwner) {
       // Nobody can claim the owner address without the setup code from the server's configuration.
       if (!this.ownerSetupCode || !secretsMatch(code, this.ownerSetupCode)) {
-        throw new AccountError('invalid_invite', 'This address needs the owner setup code.');
+        throw new AccountError('invalid_invite', 'This invite code is not valid or has been used up.');
       }
     } else if (input.mode === 'closed') {
       throw new AccountError('registration_closed', 'Registration is closed at the moment.');
     } else if (input.mode === 'invite' && !code) {
       throw new AccountError('invite_required', 'An invite code is needed to join the beta.');
     }
-    if (this.byEmail(email)) throw new AccountError('email_taken', 'An account with this email already exists.');
-
     const pwHash = await hashPassword(input.password);
     const id = `u_${randomBytes(9).toString('base64url')}`;
     const t = this.now();
@@ -170,8 +174,12 @@ export class Accounts {
              VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
           )
           .run(id, email, input.name.trim(), pwHash, isOwner ? 'owner' : 'student', invite ? 1 : 0, t, invite);
-      } catch {
-        throw new AccountError('email_taken', 'An account with this email already exists.');
+      } catch (err) {
+        // Only a duplicate address is "taken"; a full disk or a busy database is a real error.
+        if (/UNIQUE/i.test(err instanceof Error ? err.message : '')) {
+          throw new AccountError('email_taken', 'An account with this email already exists.');
+        }
+        throw err;
       }
       return this.byId(id)!;
     });
@@ -197,8 +205,14 @@ export class Accounts {
     this.db
       .prepare('INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at, last_seen_at) VALUES (?, ?, ?, ?, ?)')
       .run(sha256(token), userId, t, t + SESSION_TTL_MS, t);
-    // Old expired rows are cleared as new sessions are made.
+    // Old expired rows are cleared as new sessions are made, and one account keeps at most ten devices signed in.
     this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(t);
+    this.db
+      .prepare(
+        `DELETE FROM auth_sessions WHERE user_id = ? AND token_hash NOT IN
+           (SELECT token_hash FROM auth_sessions WHERE user_id = ? ORDER BY last_seen_at DESC, created_at DESC LIMIT ${MAX_SESSIONS_PER_USER})`,
+      )
+      .run(userId, userId);
     return token;
   }
 
@@ -255,7 +269,8 @@ export class Accounts {
     const fail = new AccountError('invalid_reset', 'This reset code is not valid or has expired.');
     const user = this.byEmail(email);
     const pwHash = await hashPassword(password);
-    if (!user) throw fail;
+    // A suspended account cannot be reopened with a reset code.
+    if (!user || user.status !== 'active') throw fail;
     const t = this.now();
     const claimed = this.db
       .prepare('UPDATE reset_codes SET used_at = ? WHERE code_hash = ? AND user_id = ? AND used_at IS NULL AND expires_at > ?')

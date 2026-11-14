@@ -152,6 +152,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
         writeSession(null);
         clearAccountCache(id);
+        // Slide pictures read on this device go too, so the next person here cannot see them.
+        try {
+          window.indexedDB?.deleteDatabase('una-learning-figures');
+        } catch {
+          /* ignore */
+        }
         setUser(null);
         setMode('guest');
       },

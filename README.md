@@ -64,6 +64,7 @@ Restart the server, open the site, choose "Create account", then "I have an invi
 - Courses and progress are cached in the browser under a per-account key and saved to the account. A second device downloads them at sign-in. When two devices change progress, the copies are merged (`lib/account/merge.ts`): finished lessons and review records from both are kept and XP takes the larger total. Signing out uploads pending changes, then removes the account's data from that browser.
 - Work done in a browser before registering there (the device-only mode) moves into the new account at registration.
 - **The uploaded PDF or PowerPoint file is still never sent anywhere.** The account holds the generated course (lessons, citations, plan), not the original file. Slide pictures stay in the browser that read the file, so they do not appear on a second device.
+- Limits that protect the server: wrong passwords are counted per account and address (8 in 15 minutes) and correct sign-ins never count; an account keeps at most ten devices signed in; one account can store 30 MB of courses; activity reports are capped per browser and per day, and activity older than 400 days is deleted; the dashboard keeps the 14 newest backups.
 - AI requests need a signed-in student and count against that student's daily limit, the platform's daily limit and the per-course budget. All three are set in the dashboard. The counts come from the request log in the database, so they survive a restart.
 - There is no email service. A student who forgets their password asks the owner, who creates a one-time reset code in the dashboard (valid for one hour) for the student to enter at `/reset`. Email addresses are not verified.
 
@@ -86,7 +87,7 @@ Not measured: visitors who are not signed in and whose browser sends Do Not Trac
 **Settings the owner can change without touching code:** who may register (open, invite only, closed) and invite codes; AI limits per student, per day and per course; the model name and prices; feature switches (lesson generation, PowerPoint upload, spaced review, sample courses); a site-wide announcement; the tagline and support email on the landing page; review session size and the daily XP goal.
 
 ```bash
-npm test           # 236 tests, Node's built-in runner
+npm test           # 246 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```

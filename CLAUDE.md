@@ -8,12 +8,12 @@ Mobile-first study app: course PDF or PowerPoint -> short lessons, quizzes, flas
 npm ci
 npm run dev      # frontend, http://localhost:3000
 npm run server   # lesson backend, http://127.0.0.1:8787 (offline sample mode without a key)
-npm test         # 236 tests, Node built-in runner
+npm test         # 246 tests, Node built-in runner
 npm run lint     # tsc --noEmit
 npm run build
 ```
 
-Node 24+. The test files contain 232 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 236. `node scripts/validate-provider.ts` and `node scripts/validate-adaptive.ts` make real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
+Node 24+. The test files contain 242 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 246. `node scripts/validate-provider.ts` and `node scripts/validate-adaptive.ts` make real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
 
 ## Guardrails
 

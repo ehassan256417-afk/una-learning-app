@@ -32,6 +32,47 @@ export class RateLimiter {
   }
 }
 
+/**
+ * Counts failed attempts per key (wrong passwords, wrong codes). Unlike
+ * `RateLimiter` a success costs nothing, so signing in normally can never
+ * lock an account, and the count is cleared when the right secret is given.
+ */
+export class FailureLimiter {
+  private fails = new Map<string, { count: number; resetAt: number }>();
+  private max: number;
+  private windowMs: number;
+  private now: () => number;
+
+  constructor(max: number, windowMs: number, now: () => number = Date.now) {
+    this.max = max;
+    this.windowMs = windowMs;
+    this.now = now;
+  }
+
+  /** Seconds until the key may try again, or 0 when it is not blocked. */
+  blockedFor(key: string): number {
+    const entry = this.fails.get(key);
+    const t = this.now();
+    if (!entry || entry.resetAt <= t) return 0;
+    return entry.count >= this.max ? Math.ceil((entry.resetAt - t) / 1000) : 0;
+  }
+
+  fail(key: string) {
+    const t = this.now();
+    const entry = this.fails.get(key);
+    if (!entry || entry.resetAt <= t) {
+      this.fails.set(key, { count: 1, resetAt: t + this.windowMs });
+      if (this.fails.size >= 5000) for (const [k, v] of this.fails) if (v.resetAt <= t) this.fails.delete(k);
+      return;
+    }
+    entry.count++;
+  }
+
+  clear(key: string) {
+    this.fails.delete(key);
+  }
+}
+
 /** Exact-match allow-list. CORS limits browsers only; it is not authentication. */
 export function isAllowedOrigin(origin: string | undefined, allowed: string[]): boolean {
   if (!origin) return false;

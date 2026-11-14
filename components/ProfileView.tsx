@@ -254,7 +254,7 @@ export function ProfileView() {
               return;
             }
             void run(async () => {
-              await api('/api/auth/password', { body: { current, next } });
+              await api('/api/auth/password', { body: { current, next }, quiet401: true });
               return 'Password changed. Your other devices were signed out.';
             });
           }}
@@ -288,7 +288,7 @@ export function ProfileView() {
           onSubmit={(e) => {
             e.preventDefault();
             void run(async () => {
-              await api('/api/me', { method: 'DELETE', body: { password: current } });
+              await api('/api/me', { method: 'DELETE', body: { password: current }, quiet401: true });
               await signOut();
               return 'Your account was deleted.';
             });
