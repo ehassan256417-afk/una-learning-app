@@ -1,6 +1,6 @@
 # UNA Learning
 
-Mobile-first study app that turns course PDFs and PowerPoint slides into short lessons, quizzes and flashcards, then brings them back for spaced review.
+Study platform that turns course PDFs and PowerPoint slides into short lessons, quizzes and flashcards, then brings them back for spaced review. Students have private accounts that follow them across devices, and the owner has a dashboard for visitors, students, AI usage and settings.
 
 Independent student project for UNA students. **Not affiliated with or endorsed by the University of North Alabama.** The lion mascot is original artwork; no official university marks are used.
 
@@ -10,19 +10,23 @@ Live demo (static frontend): https://ehassan256417-afk.github.io/una-learning-ap
 
 | Area | Status |
 | --- | --- |
-| Dashboard, learning path, pre-lesson, lesson, quiz, flashcards, progress, profile | Working, with demo courses labeled "Demo" |
+| Public landing page; nothing else is visible without signing in | Working |
+| Accounts: register, sign in, sign out, change password, reset with a code from the owner, export and delete | Working locally (see "Accounts and the owner dashboard") |
+| Courses and progress saved to the account and merged across devices | Working locally |
+| Owner dashboard at `/owner`: traffic, funnel, students, AI usage, content, settings, invites, audit log, backups | Working locally, from real recorded events |
+| Dashboard, learning path, pre-lesson, lesson, quiz, flashcards, progress, profile | Working. Hand-written example courses are labeled "Sample" and can be switched off |
 | PDF upload with validation (type, size, file signature, page limit, scanned-PDF detection) | Working in the browser |
 | PDF text extraction with page numbers | Working in the browser; the file never leaves the device |
 | PowerPoint (.pptx) extraction: slide text, tables, speaker notes, slide numbers | Working in the browser; the file never leaves the device |
 | Pictures from slides shown beside the notes that cite the slide | Working. Stored on the device only; no model looks at them |
-| Mastery loop, flashcard self-rating, spaced review, weak-concept tracking | Working, stored on the device |
+| Mastery loop, flashcard self-rating, spaced review, weak-concept tracking | Working, saved to the account |
 | Lesson backend (`server/`) with provider abstraction | Working locally |
 | Offline sample provider (no AI, no key) | Working, used by tests and local development |
 | ZRO provider (primary, `deepseek-v4.1-flash`) | Implemented from the ZRO API reference and unit-tested against a mocked API. **Not yet run against the real API** (needs a key) |
 | Gemini provider (optional) | Kept as an alternative. Run against the real API on 2026-11-13: the default model `gemini-2.5-flash` is retired for new keys, newer models often returned HTTP 503, and the 8,192 output-token cap cut lessons off. Not recommended without changes |
 | Grounding check of generated content against the PDF | Working |
 | Saved lessons (no repeated AI requests) | Working: browser storage plus a short-lived backend cache |
-| Hosted AI backend | **Not deployed.** The live site shows "not connected" on the Upload screen |
+| Hosted backend | **Not deployed.** Until it is, the live site runs in device-only mode: no accounts, data stays in the browser, and Upload shows "not connected" |
 
 ## Run it
 
@@ -40,8 +44,49 @@ To use real AI, copy `server/.env.example` to `.env` in the project root and set
 
 `node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
+## Accounts and the owner dashboard
+
+`npm run server` now also runs the platform: accounts, each student's saved courses and progress, measured activity, the AI request log, settings and an audit log. It is stored in one SQLite file, `data/una.db` (Node's built-in `node:sqlite`, no extra dependency). `data/` is git-ignored: it holds real students' data, so back it up and never commit it.
+
+**Create the owner account once.** Put your email and a long random code in `.env`:
+
+```
+OWNER_EMAIL=you@example.com
+OWNER_SETUP_CODE=a-long-random-string
+```
+
+Restart the server, open the site, choose "Create account", then "I have an invite code", and enter that email with the setup code. That account is the owner; the role cannot be given any other way, and nobody can claim your email without the code. The dashboard is at `/owner` (also linked from your profile). To everyone else that address shows "Page not found".
+
+**How it fits together**
+
+- A session is a random token sent in the `Authorization` header. The database stores only its SHA-256. Passwords are stored as salted scrypt hashes. Cookies are not used, because the site and the backend are on different domains and browsers block cross-site cookies.
+- `/api/me/*` reads and writes only the signed-in account's rows; the account id comes from the session, never from the request. `/api/admin/*` needs the owner role.
+- Courses and progress are cached in the browser under a per-account key and saved to the account. A second device downloads them at sign-in. When two devices change progress, the copies are merged (`lib/account/merge.ts`): finished lessons and review records from both are kept and XP takes the larger total. Signing out uploads pending changes, then removes the account's data from that browser.
+- Work done in a browser before registering there (the device-only mode) moves into the new account at registration.
+- **The uploaded PDF or PowerPoint file is still never sent anywhere.** The account holds the generated course (lessons, citations, plan), not the original file. Slide pictures stay in the browser that read the file, so they do not appear on a second device.
+- AI requests need a signed-in student and count against that student's daily limit, the platform's daily limit and the per-course budget. All three are set in the dashboard. The counts come from the request log in the database, so they survive a restart.
+- There is no email service. A student who forgets their password asks the owner, who creates a one-time reset code in the dashboard (valid for one hour) for the student to enter at `/reset`. Email addresses are not verified.
+
+**What is measured, and how honest the numbers are**
+
+| Number | How it is counted |
+| --- | --- |
+| Visits, page views, moves between pages, exits | Recorded events. Only the kind of page is stored (for example `/my/lesson`); course ids and query strings are never sent |
+| Unique visitors, returning visitors | A random id kept in the browser. **An estimate**: one person on two devices counts twice, and clearing browser data starts a new id |
+| Active time | Seconds with the tab visible and keyboard, pointer, touch or scroll input in the last minute. An open tab nobody touches adds nothing. The server never credits more time than passed since the previous report |
+| Study time | The part of active time spent in a lesson or a review session |
+| Sign-ups, sign-ins, AI requests, tokens, failures | Recorded by the server itself |
+| Token counts | From the provider when it reports them; otherwise estimated and marked so |
+| Cost | **An estimate**: tokens multiplied by the prices you enter in Settings. Empty until you enter prices |
+
+Not measured: visitors who are not signed in and whose browser sends Do Not Track or Global Privacy Control, and the owner's own use of the app. Days are UTC. No IP addresses, names or document text are stored in the activity tables, and there are no third-party analytics.
+
+**What the owner can and cannot see.** The owner sees each student's email, name, activity, learning numbers, AI usage and the titles and file names of their courses. The dashboard does not show lesson text. Opening one student's record, and every change (suspend, beta flag, reset code, sign out, delete, take a course offline, settings, invites, backups), is written to the audit log.
+
+**Settings the owner can change without touching code:** who may register (open, invite only, closed) and invite codes; AI limits per student, per day and per course; the model name and prices; feature switches (lesson generation, PowerPoint upload, spaced review, sample courses); a site-wide announcement; the tagline and support email on the landing page; review session size and the daily XP goal.
+
 ```bash
-npm test           # 184 tests, Node's built-in runner
+npm test           # 236 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```
@@ -62,7 +107,8 @@ opened via /my?c=...                            return verified course
 - **The PDF file is never uploaded.** Text is extracted in the browser and only that text is sent to the backend.
 - **API keys live only on the backend.** No key, provider URL or backend address is in the Pages bundle.
 - **Nothing private goes to GitHub.** `*.pdf` and `.env*` are git-ignored; test PDFs are synthetic and generated in memory.
-- **Lessons are stored on the student's device** (`localStorage`). The backend keeps results in memory only, for up to 24 hours, keyed by a hash of the text.
+- **Lessons are cached on the student's device** (`localStorage`) and, when signed in, saved to their account in the backend's database. The lesson cache keeps results in memory for up to 24 hours, keyed by a hash of the text.
+- **Extracted text is not stored.** It is sent to the backend for a lesson request, passed to the AI provider and dropped; only the generated lessons (with their short quotes) are saved.
 
 ```
 app/                 routes; /my opens PDF courses from browser storage
@@ -72,7 +118,11 @@ lib/pptx/            .pptx validation and slide-level extraction (text, tables, 
 lib/source/          one entry point that reads either file type in the browser
 lib/progress/        XP, streak, unlocking, and mastery / spaced review (`mastery.ts`)
 lib/learning/        types, API contracts, grounding verification, browser store
+lib/account/         session, API client, progress merge, course sync, activity tracker, shared contracts
+components/owner/    the owner dashboard
 server/              HTTP API, generation pipeline, providers, request guards
+server/db.ts         SQLite schema; accounts.ts (passwords, sessions, invites);
+                     platform.ts (saved data, activity, AI log, dashboard queries); routes.ts (endpoints)
 tests/               unit and end-to-end tests with sample PDFs (biology, history, computing)
 ```
 
@@ -117,7 +167,7 @@ The browser runs the loop (`lib/learning/adaptive.ts`) and saves the course afte
 | `PLAN_MAX_TOKENS` | 8000 | Output cap of the planning request |
 | `LESSON_MAX_TOKENS` | 6000 | Output cap of one lesson request |
 
-Plans and lessons are cached in memory for 24 hours, and the daily cap still applies. Limits: the per-course budget is tied to the client address, so it is a cost guard for honest use, not a defence against abuse (there is still no authentication); a failed request that reports no usage is counted as a request but as 0 tokens.
+These `.env` values are only the starting point: once the owner saves settings in the dashboard, the dashboard values apply. Plans and lessons are cached in memory for 24 hours, and the daily caps still apply. The per-course budget is tied to the signed-in student. Its counters are in memory, so a restart resets a course's budget (the daily limits are in the database and do not reset). A failed request that reports no usage is counted as a request but as 0 tokens.
 
 The older single-request endpoint (`POST /api/lessons/generate`) still exists for the validation script; the app no longer uses it.
 
@@ -148,8 +198,12 @@ Items that fail are removed, and a course with nothing left is rejected. The app
 
 The backend is intentionally not deployed. Review these first:
 
-- [ ] **Authentication.** There is none. CORS only restricts browsers; anyone can call the API directly. Add sign-in or signed requests.
-- [ ] **Rate limits.** Per-address and daily caps are in memory and reset on restart. Use a shared store if there is more than one instance, and set `DAILY_GENERATION_CAP` to fit the free quota.
+- [x] **Authentication.** AI requests need a signed-in student. Set `OWNER_EMAIL` and `OWNER_SETUP_CODE`, and consider starting with `REGISTRATION_MODE=invite` so only people you invite can register and use your AI quota.
+- [ ] **Hosting.** The backend needs a host that runs Node 24 and keeps a disk (the SQLite file). One instance only: sign-in rate limits, course budgets and the lesson cache are in memory, and SQLite is a single file. That is enough for a beta of tens of students; a larger launch needs a shared database and rate-limit store.
+- [ ] **Backups.** Everything students have is in `DATA_DIR`. "Back up now" in the dashboard writes a copy to `DATA_DIR/backups` on the same disk; copy those files somewhere else on a schedule.
+- [ ] **Reverse proxy.** Behind a proxy, set `TRUST_PROXY=true` so sign-in limits apply to the visitor's address and not the proxy's. Do not set it otherwise.
+- [ ] **Privacy notice.** Accounts mean you hold personal data (emails, study activity). Publish a short privacy note saying what is stored and measured (see the table above), and that students can export and delete their account from their profile.
+- [ ] **Email.** Addresses are not verified and password reset goes through you. Add an email service before opening registration widely.
 - [ ] **Origin allow-list.** Set `ALLOWED_ORIGINS` to the exact site origin (for Pages: `https://ehassan256417-afk.github.io`). Keep `ALLOW_NO_ORIGIN` off.
 - [ ] **Data handling.** Student text is sent to the AI provider. ZRO's pricing page states zero request retention and no training on requests for every plan; read its privacy terms yourself and tell students before they upload.
 - [ ] **Course material rights.** Students should only upload material they are allowed to use.
@@ -166,5 +220,8 @@ After that, build the frontend with `NEXT_PUBLIC_LESSON_API_URL` set to the back
 - Diagrams and pictures are shown from slides but not understood: lessons are written from text only. Pictures inside PDFs are not extracted yet.
 - Server messages and the stored coverage notes still say "page" and "PDF" for slide courses.
 - Limits: 25 MB, 60 pages, 150,000 characters; long documents are trimmed before generation.
-- Lessons are per device; there are no accounts or sync.
-- Demo courses and starting stats are sample content.
+- Original files and slide pictures are not stored in the account, so pictures show only on the device that read the file.
+- A browser caches at most about 5 MB of courses. Beyond that the oldest are dropped from that device (they stay in the account).
+- XP earned on two devices while both are offline is not added twice after merging, and may undercount slightly.
+- No email verification or self-service password reset; no two-factor sign-in.
+- The owner dashboard has one owner. There are no instructor or assistant roles yet.

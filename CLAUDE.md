@@ -1,6 +1,6 @@
 # UNA Learning: Claude Code guide
 
-Mobile-first study app: course PDF or PowerPoint -> short lessons, quizzes, flashcards, spaced review. Next.js 15 / React 19 / TypeScript static frontend (GitHub Pages) plus a Node lesson backend in `server/` that is **not deployed**. See `README.md` for architecture, the lesson format and the pre-deploy checklist.
+Mobile-first study app: course PDF or PowerPoint -> short lessons, quizzes, flashcards, spaced review, with student accounts and an owner dashboard. Next.js 15 / React 19 / TypeScript static frontend (GitHub Pages) plus a Node backend in `server/` (lessons, accounts, SQLite storage, owner API) that is **not deployed**. See `README.md` for architecture, the lesson format and the pre-deploy checklist.
 
 ## Commands
 
@@ -8,22 +8,25 @@ Mobile-first study app: course PDF or PowerPoint -> short lessons, quizzes, flas
 npm ci
 npm run dev      # frontend, http://localhost:3000
 npm run server   # lesson backend, http://127.0.0.1:8787 (offline sample mode without a key)
-npm test         # 184 tests, Node built-in runner
+npm test         # 236 tests, Node built-in runner
 npm run lint     # tsc --noEmit
 npm run build
 ```
 
-Node 24+. The test files contain 180 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 184. `node scripts/validate-provider.ts` and `node scripts/validate-adaptive.ts` make real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
+Node 24+. The test files contain 232 `it(...)` calls; two of them sit inside `for (const key of SAMPLE_KEYS)` loops over the three sample PDFs (`tests/pdf.test.ts`, `tests/generate.test.ts`), so the runner reports 236. `node scripts/validate-provider.ts` and `node scripts/validate-adaptive.ts` make real, billable API calls: never run it without the user's approval. Run `npm test` and `npm run lint` before calling any code change done.
 
 ## Guardrails
 
 - A push to `main` deploys to GitHub Pages (`.github/workflows/pages.yml`). Work on a branch; never push to `main` or deploy the backend unless asked.
-- Never commit `.env*` or `*.pdf`. No API key, provider URL or backend address in frontend code.
+- Never commit `.env*`, `*.pdf` or `data/` (the SQLite database with real students' accounts and progress). No API key, provider URL or backend address in frontend code.
 - The uploaded file (PDF or .pptx) never leaves the browser; only `{ page, text }` goes to the backend. For slides, `page` is the slide number. Slide pictures stay in IndexedDB on the device and are never sent anywhere.
 - `lib/pptx/extract.ts` parses untrusted zip and XML. Keep its size caps, the duplicate-entry check, `assertTagsClosed` and the `indexOf`-based element scanning; do not reintroduce lazy `[\s\S]*?` patterns over a whole part.
 - Grounding checks (`lib/learning/verify.ts`, `lib/learning/grounding.ts`) and request guards (`server/security.ts`) are the trust boundary. Changes there need tests first and a security review.
 - Lesson generation is adaptive: `server/plan.ts` (one planning request, verified by fixed rules), `server/lesson.ts` (one request per lesson), `lib/learning/coverage.ts` and the browser driver `lib/learning/adaptive.ts`. Never add an automatic retry of an AI request, and keep every request inside the per-course budget (`server/budget.ts`).
-- Phases 1 and 2 are done. Do not rebuild or restructure finished work. ZRO (`server/providers/zro.ts`) is the primary AI provider; Gemini is kept as an optional alternative. Open items: real ZRO run, auth, shared rate-limit store, backend hosting (README "Before deploying the backend").
+- Accounts are the trust boundary for student data: `server/accounts.ts`, `server/routes.ts`, `server/platform.ts`. `/api/me/*` must take the account id from the session only; `/api/admin/*` must check the owner role and write an audit entry for every change. Changes there need tests in `tests/platform.test.ts` first and a security review. Never route them to Haiku.
+- Owner dashboard numbers come from recorded rows only. No sample or invented data, and estimates (unique visitors, cost, estimated tokens) stay labeled as estimates.
+- Activity tracking (`lib/account/tracker.ts`) sends route names and counts only: never course ids, query strings, names or document text.
+- Phases 1 and 2 are done, and so is the accounts milestone (accounts, sync, activity, owner dashboard). Do not rebuild or restructure finished work. ZRO (`server/providers/zro.ts`) is the primary AI provider; Gemini is kept as an optional alternative. Open items: real ZRO run, backend hosting and backups, email (verification, self-service reset), shared rate-limit store (README "Before deploying the backend").
 - `.claude/` is git-ignored, so shared agent configuration lives in this file. Do not add project agents or change global settings; reuse what is installed.
 
 ## Model routing (default)
