@@ -10,6 +10,7 @@ import type {
   PlanRequest,
   PlanResponse,
 } from './contracts.ts';
+import { authHeaders } from '../account/client.ts';
 
 /**
  * Browser client for the lesson backend.
@@ -54,7 +55,7 @@ async function post<T>(path: string, payload: unknown, isValid: (body: unknown) 
   try {
     res = await fetch(`${LESSON_API_URL}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
       signal,
     });
@@ -103,7 +104,7 @@ export async function requestLessons(doc: ExtractedDocument, signal?: AbortSigna
   try {
     res = await fetch(`${LESSON_API_URL}/api/lessons/generate`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
       signal,
     });

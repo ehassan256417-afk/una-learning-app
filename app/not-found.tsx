@@ -7,9 +7,9 @@ export default function NotFound() {
       <div className="lockedscreen">
         <LionMascot size={96} />
         <h1>Page not found</h1>
-        <p>That course or section does not exist in the demo.</p>
+        <p>There is nothing at this address.</p>
         <Link href="/" className="btn btn-gold">
-          Back to dashboard
+          Back to home
         </Link>
       </div>
     </main>

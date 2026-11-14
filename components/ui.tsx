@@ -23,7 +23,7 @@ export function ProgressBar({
 }
 
 /** Small pill that marks sample content. Shown wherever demo data appears. */
-export function DemoTag({ children = 'Demo' }: { children?: React.ReactNode }) {
+export function DemoTag({ children = 'Sample' }: { children?: React.ReactNode }) {
   return <span className="demotag">{children}</span>;
 }
 

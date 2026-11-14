@@ -1,9 +1,10 @@
 import type { Metadata, Viewport } from 'next';
 import { Poppins } from 'next/font/google';
-import { Suspense } from 'react';
-import { BottomNav } from '@/components/BottomNav';
+import { Shell } from '@/components/Shell';
+import { SessionProvider } from '@/lib/account/session';
 import { ProgressProvider } from '@/lib/progress/store';
 import './globals.css';
+import './accounts.css';
 
 const poppins = Poppins({
   subsets: ['latin'],
@@ -13,9 +14,9 @@ const poppins = Poppins({
 });
 
 export const metadata: Metadata = {
-  title: 'UNA Learning — Student Beta',
+  title: 'UNA Learning — lessons from your own course material',
   description:
-    'Independent student project for UNA learners. Not an official University of North Alabama application.',
+    'Turn course PDFs and slides into short lessons, quizzes and spaced review. An independent student project, not an official University of North Alabama application.',
 };
 
 export const viewport: Viewport = {
@@ -29,14 +30,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={poppins.variable}>
       <body>
-        <ProgressProvider>
-          <div className="app">
-            {children}
-            <Suspense fallback={null}>
-              <BottomNav />
-            </Suspense>
-          </div>
-        </ProgressProvider>
+        <SessionProvider>
+          <ProgressProvider>
+            <Shell>{children}</Shell>
+          </ProgressProvider>
+        </SessionProvider>
       </body>
     </html>
   );

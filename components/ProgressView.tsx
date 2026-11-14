@@ -2,6 +2,7 @@
 
 import { ArrowRight, Brain, Check, Flame, Repeat, Zap } from 'lucide-react';
 import Link from 'next/link';
+import { useSession } from '@/lib/account/session';
 import { useAllCourses, useStudyCourses } from '@/lib/learning/generated-store';
 import { coursePath, isGeneratedCourse, sectionPath } from '@/lib/learning/links';
 import type { CourseSummary } from '@/lib/learning/types';
@@ -10,18 +11,20 @@ import { dayIndex, describeDue, dueItems, nextDueDay, summarizeMastery } from '@
 import { computeBadges } from '@/lib/progress/badges';
 import { courseProgress, levelFor, useProgress } from '@/lib/progress/store';
 import { AppHeader } from './AppHeader';
-import { BadgeMedal, DemoTag, ProgressBar } from './ui';
+import { BadgeMedal, ProgressBar } from './ui';
 
 const DAYS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+const EMPTY_COURSES: CourseSummary[] = [];
 
 export function ProgressView({ courses: demoCourses }: { courses: CourseSummary[] }) {
   const { state, ready } = useProgress();
-  const { all: courses } = useAllCourses(demoCourses);
+  const { config } = useSession();
+  const { all: courses } = useAllCourses(config.features.sampleCourses ? demoCourses : EMPTY_COURSES);
   const level = levelFor(state.xp);
   const badges = computeBadges(state, courses);
   const sectionsDone = courses.reduce((n, c) => n + courseProgress(c.id, c.sectionIds, state).done, 0);
   const sectionsTotal = courses.reduce((n, c) => n + c.sectionIds.length, 0);
-  const study = useStudyCourses();
+  const study = useStudyCourses(config.features.sampleCourses);
   const todayIndex = dayIndex(new Date());
   const dueNow = ready ? dueItems(study, state.review, todayIndex).length : 0;
   const nextDue = ready ? nextDueDay(study, state.review) : null;
@@ -47,10 +50,6 @@ export function ProgressView({ courses: demoCourses }: { courses: CourseSummary[
       </section>
 
       <div className="pad pad-top">
-        <p className="demo-line">
-          <DemoTag /> Starting stats are sample values. Lessons you finish here are added on top.
-        </p>
-
         <div className="card levelcard">
           <div className="levelring" style={{ ['--pct' as string]: `${level.pct}%` }}>
             <span>
@@ -137,7 +136,7 @@ export function ProgressView({ courses: demoCourses }: { courses: CourseSummary[
               )}
             </>
           )}
-          <Link href="/review" className="reviewcta">
+          {config.features.spacedReview && <Link href="/review" className="reviewcta">
             <Repeat size={20} />
             <span>
               <b>{dueNow > 0 ? `${dueNow} item${dueNow === 1 ? '' : 's'} due for review` : 'Review'}</b>
@@ -148,7 +147,7 @@ export function ProgressView({ courses: demoCourses }: { courses: CourseSummary[
                   : 'Finished lessons come back here for spaced review.'}
             </span>
             <ArrowRight size={18} />
-          </Link>
+          </Link>}
         </div>
 
         <div className="card">

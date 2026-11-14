@@ -18,12 +18,13 @@ import {
   XCircle,
 } from 'lucide-react';
 import Link from 'next/link';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { coursePath, sectionPath } from '@/lib/learning/links';
 import type { Course, LearningLevel, Section } from '@/lib/learning/types';
 import { LEVEL_LABELS, isDemo, sourceUnit } from '@/lib/learning/types';
 import { answerQuiz, itemKey, quizScore, startQuiz, type Grade, type GradeEntry } from '@/lib/progress/mastery';
 import { sectionKey, sectionStatuses, useProgress } from '@/lib/progress/store';
+import { track } from '@/lib/account/tracker';
 import { LionMascot } from './LionMascot';
 import { SourceFigures } from './SourceFigures';
 import { DemoTag, ProgressBar, RichText, SourceLine } from './ui';
@@ -86,6 +87,14 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
     window.scrollTo(0, 0);
   }, [stage, currentIdx, noteIdx]);
 
+  // Counted once per opened lesson, also when React runs effects twice in development.
+  const startCounted = useRef(false);
+  useEffect(() => {
+    if (startCounted.current) return;
+    startCounted.current = true;
+    track('lesson_started');
+  }, []);
+
   const levelState = (lv: LearningLevel): 'done' | 'current' | 'locked' => {
     const idxs = questions.map((x, i) => (x.level === lv ? i : -1)).filter((i) => i >= 0);
     if (stage === 'done' || (idxs.length > 0 && idxs.every((i) => !run.queue.includes(i)))) return 'done';
@@ -111,6 +120,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
     ];
     setAwarded(completeSection(sectionKey(course.id, section.id), { score, total: questions.length, xp: earned }));
     gradeItems(grades);
+    track('lesson_completed', questions.length ? Math.round((score / questions.length) * 100) : 100);
     setStage('done');
   };
 

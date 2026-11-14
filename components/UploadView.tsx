@@ -28,6 +28,8 @@ import type { Course } from '@/lib/learning/types';
 import { formatBytes } from '@/lib/pdf/validate';
 import { checkSourceFile, readSourceFile, SourceFileError, sourceKindOf, type SourceFileKind } from '@/lib/source/browser';
 import { useProgress } from '@/lib/progress/store';
+import { useSession } from '@/lib/account/session';
+import { track } from '@/lib/account/tracker';
 import { AppHeader } from './AppHeader';
 
 const PIPELINE = [
@@ -50,6 +52,9 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export function UploadView() {
   const { markPdfSelected } = useProgress();
+  const { mode, config } = useSession();
+  const generationOn = config.features.generation;
+  const pptxOn = config.features.pptxUpload;
   const input = useRef<HTMLInputElement>(null);
   const [backend, setBackend] = useState<Backend>({ state: LESSON_API_URL ? 'checking' : 'off' });
   const [file, setFile] = useState<{ name: string; size: number; kind: SourceFileKind } | null>(null);
@@ -90,7 +95,8 @@ export function UploadView() {
     setError('');
     setDoc(null);
     setFigures([]);
-    const problem = checkSourceFile(picked);
+    const problem =
+      !pptxOn && sourceKindOf(picked) === 'pptx' ? 'PowerPoint files are switched off at the moment. Please upload a PDF.' : checkSourceFile(picked);
     if (problem) {
       setFile(null);
       setPhase({ step: 'idle' });
@@ -108,6 +114,7 @@ export function UploadView() {
       setFigures(source.figures);
       setDoc(extracted);
       markPdfSelected();
+      track('upload_selected');
       const saved = findGeneratedByDocument(extracted.id);
       setPhase(saved ? { step: 'done', course: saved, reused: 'saved' } : { step: 'ready' });
     } catch (err) {
@@ -140,6 +147,7 @@ export function UploadView() {
     const previous = findGeneratedByDocument(doc.id);
     // Slide pictures stay in this browser; lessons show them beside the notes that cite the slide.
     if (figures.length > 0) void saveFigures(doc.id, figures);
+    track('generation_started');
     try {
       const result = await generateAdaptiveCourse({
         doc,
@@ -153,6 +161,7 @@ export function UploadView() {
           setPhase({ step: 'generating', title: `Writing lesson ${p.index + 1} of ${p.total}`, detail: p.title });
         },
       });
+      track('generation_finished', result.ready);
       if (job.current !== id) return;
       if (result.stopped) {
         setError(result.stopped.message);
@@ -175,7 +184,7 @@ export function UploadView() {
   const busy = phase.step === 'reading' || phase.step === 'generating';
   const unit = file?.kind === 'pptx' ? 'slide' : 'page';
   const Unit = file?.kind === 'pptx' ? 'Slide' : 'Page';
-  const canGenerate = backend.state === 'up';
+  const canGenerate = backend.state === 'up' && generationOn;
   const done = phase.step === 'done' ? phase.course : undefined;
   const report = done?.generation?.report;
   const planned = done?.plan?.lessons.length ?? 0;
@@ -219,7 +228,15 @@ export function UploadView() {
             </span>
           </div>
         )}
-        {backend.state === 'up' && (
+        {backend.state === 'up' && !generationOn && (
+          <div className="note note-warn" role="status">
+            <WifiOff size={20} />
+            <span>
+              <b>Creating new lessons is switched off at the moment.</b> Lessons you already have still work.
+            </span>
+          </div>
+        )}
+        {backend.state === 'up' && generationOn && (
           <div className="note note-info" role="status">
             <ShieldCheck size={20} />
             <span>
@@ -236,8 +253,8 @@ export function UploadView() {
             <span className="drop-ico">
               <FileUp size={30} />
             </span>
-            <strong>Choose a PDF or PowerPoint</strong>
-            <small>.pdf or .pptx with real text • up to 25 MB and 60 pages or slides</small>
+            <strong>{pptxOn ? 'Choose a PDF or PowerPoint' : 'Choose a PDF'}</strong>
+            <small>{pptxOn ? '.pdf or .pptx' : '.pdf'} with real text • up to 25 MB and 60 pages{pptxOn ? ' or slides' : ''}</small>
             <input
               ref={input}
               type="file"
@@ -363,7 +380,9 @@ export function UploadView() {
               </p>
             )}
             {phase.reused === 'saved' && (
-              <p className="muted">These were generated earlier on this device, so no new AI request was made.</p>
+              <p className="muted">
+                These were generated earlier{mode === 'user' ? ' and are saved in your account' : ' on this device'}, so no new AI request was made.
+              </p>
             )}
             {done.sections.length > 0 && (
               <Link href={coursePath(done)} className="btn btn-gold btn-xl gap-top">
@@ -408,9 +427,9 @@ export function UploadView() {
           </ol>
         </div>
 
-        {!busy && phase.step !== 'done' && (
+        {!busy && phase.step !== 'done' && config.features.sampleCourses && (
           <Link href="/courses/cis-344" className="textlink center">
-            Or explore a demo learning path <ArrowRight size={16} />
+            Or explore a sample learning path <ArrowRight size={16} />
           </Link>
         )}
       </div>

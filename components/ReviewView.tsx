@@ -7,11 +7,12 @@ import { useStudyCourses } from '@/lib/learning/generated-store';
 import { sourceUnit } from '@/lib/learning/types';
 import { dayIndex, describeDue, dueItems, nextDueDay, type Grade, type ReviewItem } from '@/lib/progress/mastery';
 import { useProgress } from '@/lib/progress/store';
+import { useSession } from '@/lib/account/session';
+import { track } from '@/lib/account/tracker';
 import { AppHeader } from './AppHeader';
 import { ProgressBar, RichText, SourceLine } from './ui';
 
 /** Items in one sitting. Short sessions get finished; long ones get abandoned. */
-const SESSION_SIZE = 15;
 /** XP for recalling a due item. Small on purpose: review is its own reward, lessons carry the XP. */
 const XP_PER_RECALL = 2;
 
@@ -32,7 +33,8 @@ interface Session {
 
 export function ReviewView() {
   const { state, ready, gradeItems } = useProgress();
-  const courses = useStudyCourses();
+  const { config } = useSession();
+  const courses = useStudyCourses(config.features.sampleCourses);
   const [session, setSession] = useState<Session | null>(null);
   const [picked, setPicked] = useState<number | null>(null);
   const [checked, setChecked] = useState(false);
@@ -47,7 +49,7 @@ export function ReviewView() {
   }, [item?.key, session?.queue.length]);
 
   const start = () => {
-    const queue = due.slice(0, SESSION_SIZE);
+    const queue = due.slice(0, config.learning.reviewSessionSize);
     setSession({ queue, total: queue.length, recalled: [], missed: [] });
     setPicked(null);
     setChecked(false);
@@ -60,6 +62,8 @@ export function ReviewView() {
     const firstAttempt = !session.recalled.includes(item.key) && !session.missed.includes(item.key);
     gradeItems([{ key: item.key, grade: g }], g === 'again' ? 0 : XP_PER_RECALL);
     const [, ...rest] = session.queue;
+    // The session is over when the last item is recalled.
+    if (g !== 'again' && rest.length === 0) track('review_completed', session.total);
     setSession({
       ...session,
       queue: g === 'again' ? [...rest, item] : rest,
@@ -107,7 +111,7 @@ export function ReviewView() {
               remember moves to a longer gap: 1 day, then 3, 7, 16 and 35.
             </p>
             <button type="button" className="btn btn-gold btn-xl" onClick={start}>
-              Start review{due.length > SESSION_SIZE ? ` (first ${SESSION_SIZE})` : ''} <ArrowRight size={20} />
+              Start review{due.length > config.learning.reviewSessionSize ? ` (first ${config.learning.reviewSessionSize})` : ''} <ArrowRight size={20} />
             </button>
           </div>
         )}
