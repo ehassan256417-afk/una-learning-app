@@ -62,7 +62,18 @@ export function RichText({ text, highlight }: { text: string; highlight?: string
  * that an automated check matched. The wording stays modest on purpose: the
  * check finds the quote on the page, it does not prove the statement is right.
  */
-export function SourceLine({ provenance, demoText }: { provenance: Provenance; demoText: string }) {
+export function SourceLine({
+  provenance,
+  demoText,
+  unit = 'page',
+  source = 'PDF',
+}: {
+  provenance: Provenance;
+  demoText: string;
+  /** What a citation number counts: PDF pages or presentation slides. */
+  unit?: 'page' | 'slide';
+  source?: string;
+}) {
   if (provenance.kind === 'demo') {
     return (
       <footer className="sourceline">
@@ -74,12 +85,14 @@ export function SourceLine({ provenance, demoText }: { provenance: Provenance; d
   if (!citation) return null;
   return (
     <footer className="sourceline cite">
-      <span className="pagechip">Page {citation.page}</span>
+      <span className="pagechip">
+        {unit === 'slide' ? 'Slide' : 'Page'} {citation.page}
+      </span>
       <span>
         <q>{citation.excerpt}</q>
         <em>
-          {citation.support === 'close' ? 'A close match for this quote' : 'This quote'} was found on page{' '}
-          {citation.page} of your PDF by an automated check.
+          {citation.support === 'close' ? 'A close match for this quote' : 'This quote'} was found on {unit}{' '}
+          {citation.page} of your {source} by an automated check.
         </em>
       </span>
     </footer>

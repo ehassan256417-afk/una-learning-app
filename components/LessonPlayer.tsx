@@ -4,11 +4,13 @@ import {
   ArrowLeft,
   ArrowRight,
   BookOpen,
+  CalendarClock,
   Check,
   CheckCircle2,
   CircleHelp,
   Layers,
   Lock,
+  Repeat,
   RotateCcw,
   Star,
   Trophy,
@@ -19,9 +21,11 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { coursePath, sectionPath } from '@/lib/learning/links';
 import type { Course, LearningLevel, Section } from '@/lib/learning/types';
-import { LEVEL_LABELS, isDemo } from '@/lib/learning/types';
+import { LEVEL_LABELS, isDemo, sourceUnit } from '@/lib/learning/types';
+import { answerQuiz, itemKey, quizScore, startQuiz, type Grade, type GradeEntry } from '@/lib/progress/mastery';
 import { sectionKey, sectionStatuses, useProgress } from '@/lib/progress/store';
 import { LionMascot } from './LionMascot';
+import { SourceFigures } from './SourceFigures';
 import { DemoTag, ProgressBar, RichText, SourceLine } from './ui';
 
 type Stage = 'notes' | 'quiz' | 'cards' | 'done';
@@ -29,20 +33,29 @@ const LEVELS: LearningLevel[] = [1, 2, 3];
 const LEVEL_ICONS = { 1: BookOpen, 2: Layers, 3: Trophy } as const;
 /** Adaptive lessons label each note with the part of the explanation it gives. */
 const ASPECT_LABELS = { what: 'What it is', why: 'Why it matters', how: 'How it works', example: 'Example' } as const;
+/** Self-ratings for a flashcard, and what each does to its next review. */
+const RATINGS: Array<{ grade: Grade; label: string; hint: string }> = [
+  { grade: 'again', label: 'Again', hint: 'Did not know it' },
+  { grade: 'good', label: 'Good', hint: 'Knew it' },
+  { grade: 'easy', label: 'Easy', hint: 'Knew it at once' },
+];
 
 export function LessonPlayer({ course, section, index }: { course: Course; section: Section; index: number }) {
-  const { state, ready, completeSection } = useProgress();
+  const { state, ready, completeSection, gradeItems } = useProgress();
   // Questions run easiest level first.
   const questions = useMemo(() => [...section.questions].sort((a, b) => a.level - b.level), [section.questions]);
+  const cards = section.flashcards;
 
   const [stage, setStage] = useState<Stage>('notes');
   const [noteIdx, setNoteIdx] = useState(0);
-  const [qIdx, setQIdx] = useState(0);
+  /** Which questions are still to be answered. A missed question returns at the end. */
+  const [run, setRun] = useState(() => startQuiz(questions.length));
   const [picked, setPicked] = useState<number | null>(null);
-  /** Per question: the chosen index once checked. */
-  const [answers, setAnswers] = useState<(number | null)[]>(() => questions.map(() => null));
+  /** The question just checked, kept on screen with its feedback until the student moves on. */
+  const [shown, setShown] = useState<{ index: number; choice: number; retry: boolean } | null>(null);
   const [cardIdx, setCardIdx] = useState(0);
   const [flipped, setFlipped] = useState(false);
+  const [ratings, setRatings] = useState<Record<number, Grade>>({});
   const [awarded, setAwarded] = useState<number | null>(null);
 
   const ids = course.sections.map((s) => s.id);
@@ -50,46 +63,62 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
   const pathHref = coursePath(course);
   const exitHref = sectionPath(course, section.id);
   const next = course.sections[index + 1];
+  const unit = sourceUnit(course);
+  const sourceName = course.sourceKind === 'pptx' ? 'slides' : 'PDF';
+  const documentId = section.provenance.kind === 'pdf' ? section.provenance.documentId : undefined;
 
-  const answeredCount = answers.filter((a) => a !== null).length;
-  const allAnswered = answeredCount === questions.length;
-  const score = answers.filter((a, i) => a === questions[i].answerIndex).length;
-  const q = questions[qIdx];
-  const checked = answers[qIdx] !== null;
-  const chosen = checked ? answers[qIdx] : picked;
+  const cleared = questions.length - run.queue.length;
+  const attempted = run.firstTry.filter((v) => v !== null).length;
+  const quizDone = run.queue.length === 0;
+  const score = quizScore(run);
+  const currentIdx = shown ? shown.index : run.queue[0];
+  const q = currentIdx === undefined ? undefined : questions[currentIdx];
+  const checked = shown !== null;
+  const chosen = shown ? shown.choice : picked;
+  const isRetry = shown ? shown.retry : currentIdx !== undefined && run.firstTry[currentIdx] !== null;
 
   const totalSteps = section.notes.length + questions.length + 1;
   const stepsDone =
-    stage === 'done'
-      ? totalSteps
-      : Math.min(totalSteps - 1, (stage === 'notes' ? noteIdx : section.notes.length) + answeredCount);
+    stage === 'done' ? totalSteps : Math.min(totalSteps - 1, (stage === 'notes' ? noteIdx : section.notes.length) + cleared);
   const progressPct = Math.round((stepsDone / totalSteps) * 100);
 
   useEffect(() => {
     window.scrollTo(0, 0);
-  }, [stage, qIdx, noteIdx]);
+  }, [stage, currentIdx, noteIdx]);
 
   const levelState = (lv: LearningLevel): 'done' | 'current' | 'locked' => {
     const idxs = questions.map((x, i) => (x.level === lv ? i : -1)).filter((i) => i >= 0);
-    if (stage === 'done' || (idxs.length > 0 && idxs.every((i) => answers[i] !== null))) return 'done';
-    const firstOpen = LEVELS.find((l) => questions.some((x, i) => x.level === l && answers[i] === null));
+    if (stage === 'done' || (idxs.length > 0 && idxs.every((i) => !run.queue.includes(i)))) return 'done';
+    const firstOpen = LEVELS.find((l) => run.queue.some((i) => questions[i].level === l));
     return firstOpen === lv ? 'current' : 'locked';
   };
 
   const check = () => {
-    if (picked === null) return;
-    setAnswers((prev) => prev.map((a, i) => (i === qIdx ? picked : a)));
+    if (picked === null || q === undefined || currentIdx === undefined) return;
+    setShown({ index: currentIdx, choice: picked, retry: run.firstTry[currentIdx] !== null });
+    setRun(answerQuiz(run, picked === q.answerIndex));
   };
 
-  const goQuestion = (i: number) => {
-    setQIdx(i);
-    setPicked(null);
+  const finish = (finalRatings: Record<number, Grade>) => {
+    const earned = questions.reduce((sum, x, i) => sum + (run.firstTry[i] ? x.xp : 0), 0) + section.xpReward;
+    // A question missed on the first try is due again today, even though it was corrected in the lesson.
+    const grades: GradeEntry[] = [
+      ...questions.map((x, i) => ({
+        key: itemKey(course.id, section.id, x.id),
+        grade: (run.firstTry[i] ? 'good' : 'again') as Grade,
+      })),
+      ...cards.map((c, i) => ({ key: itemKey(course.id, section.id, c.id), grade: finalRatings[i] ?? 'good' })),
+    ];
+    setAwarded(completeSection(sectionKey(course.id, section.id), { score, total: questions.length, xp: earned }));
+    gradeItems(grades);
+    setStage('done');
   };
 
   const afterQuestion = () => {
-    const nextOpen = answers.findIndex((a, i) => a === null && i !== qIdx);
-    if (qIdx < questions.length - 1) goQuestion(qIdx + 1);
-    else if (nextOpen >= 0) goQuestion(nextOpen);
+    setShown(null);
+    setPicked(null);
+    if (!quizDone) return;
+    if (cards.length === 0) finish(ratings);
     else {
       setStage('cards');
       setCardIdx(0);
@@ -97,20 +126,24 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
     }
   };
 
-  const finish = () => {
-    const earned = questions.reduce((sum, x, i) => sum + (answers[i] === x.answerIndex ? x.xp : 0), 0) + section.xpReward;
-    setAwarded(completeSection(sectionKey(course.id, section.id), { score, total: questions.length, xp: earned }));
-    setStage('done');
+  const rate = (grade: Grade) => {
+    const nextRatings = { ...ratings, [cardIdx]: grade };
+    setRatings(nextRatings);
+    setFlipped(false);
+    if (cardIdx < cards.length - 1) setCardIdx(cardIdx + 1);
+    else if (quizDone) finish(nextRatings);
+    else setStage('quiz');
   };
 
   const restart = () => {
     setStage('notes');
     setNoteIdx(0);
-    setQIdx(0);
+    setRun(startQuiz(questions.length));
     setPicked(null);
-    setAnswers(questions.map(() => null));
+    setShown(null);
     setCardIdx(0);
     setFlipped(false);
+    setRatings({});
     setAwarded(null);
   };
 
@@ -132,8 +165,16 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
   }
 
   const note = section.notes[noteIdx];
-  const card = section.flashcards[cardIdx];
+  const card = cards[cardIdx];
   const demo = isDemo(section.provenance);
+  const missedFirst = run.firstTry.filter((v) => v === false).length;
+  const cardsAgain = Object.values(ratings).filter((g) => g === 'again').length;
+  const dueToday = missedFirst + cardsAgain;
+  const tabs = [
+    ['notes', 'Lesson', BookOpen],
+    ['quiz', 'Quiz', CircleHelp],
+    ...(cards.length > 0 ? ([['cards', 'Flashcards', Layers]] as const) : []),
+  ] as const;
 
   return (
     <main className="screen lesson">
@@ -148,7 +189,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
             </small>
             <b>{section.title}</b>
           </div>
-          {demo ? <DemoTag /> : <span className="demotag pdftag">Your PDF</span>}
+          {demo ? <DemoTag /> : <span className="demotag pdftag">Your {sourceName}</span>}
         </div>
         <ProgressBar value={progressPct} label="Lesson progress" />
         <div className="levels" aria-label="Learning levels">
@@ -171,13 +212,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
 
       {stage !== 'done' && (
         <div className="tabs" role="tablist" aria-label="Lesson parts">
-          {(
-            [
-              ['notes', 'Lesson', BookOpen],
-              ['quiz', 'Quiz', CircleHelp],
-              ['cards', 'Flashcards', Layers],
-            ] as const
-          ).map(([id, label, Icon]) => (
+          {tabs.map(([id, label, Icon]) => (
             <button
               key={id}
               type="button"
@@ -186,7 +221,8 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               className={stage === id ? 'current' : ''}
               onClick={() => {
                 setStage(id);
-                setPicked(null);
+                // A checked answer stays recorded; only the unconfirmed pick is cleared.
+                if (!shown) setPicked(null);
                 setFlipped(false);
               }}
             >
@@ -196,7 +232,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
         </div>
       )}
 
-      {stage === 'notes' && (
+      {stage === 'notes' && note && (
         <section className="pad lesson-body">
           <article className="card notecard">
             <small className="stepcount">
@@ -208,11 +244,17 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               <RichText text={note.body} highlight={note.keyTerm} />
             </p>
             {note.example && (
-              <pre className="terminal" aria-label="Example commands">
+              <pre className="terminal" aria-label="Example">
                 <code>{note.example}</code>
               </pre>
             )}
-            <SourceLine provenance={note.provenance} demoText="Sample content, not from an uploaded PDF" />
+            {documentId && <SourceFigures documentId={documentId} provenance={note.provenance} unit={unit} />}
+            <SourceLine
+              provenance={note.provenance}
+              demoText="Sample content, not from an uploaded PDF"
+              unit={unit}
+              source={sourceName}
+            />
           </article>
           <div className="dots" aria-hidden="true">
             {section.notes.map((n, i) => (
@@ -229,26 +271,34 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               </button>
             ) : (
               <button type="button" className="btn btn-gold" onClick={() => setStage('quiz')}>
-                Start Quiz <ArrowRight size={18} />
+                {quizDone ? 'Quiz' : 'Start Quiz'} <ArrowRight size={18} />
               </button>
             )}
           </div>
         </section>
       )}
 
-      {stage === 'quiz' && (
+      {stage === 'quiz' && q && (
         <section className="pad lesson-body">
           <article className="card quizcard">
             <div className="quizcard-top">
               <span className="pill pill-purple">
                 <CircleHelp size={14} /> Quiz – Level {q.level}
               </span>
-              <span className="pill pill-xp">
-                <Star size={14} fill="currentColor" /> +{q.xp} XP
-              </span>
+              {isRetry ? (
+                <span className="pill pill-retry">
+                  <Repeat size={14} /> Try again
+                </span>
+              ) : (
+                <span className="pill pill-xp">
+                  <Star size={14} fill="currentColor" /> +{q.xp} XP
+                </span>
+              )}
             </div>
             <small className="stepcount">
-              Question {qIdx + 1} of {questions.length}
+              {isRetry
+                ? 'You missed this one earlier. Answer it correctly to finish the lesson.'
+                : `Question ${checked ? attempted : attempted + 1} of ${questions.length}`}
             </small>
             <h2 id="quiz-prompt">
               <RichText text={q.prompt} />
@@ -289,17 +339,28 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
             </div>
             {checked && (
               <div className={`feedback ${chosen === q.answerIndex ? 'good' : 'bad'}`} role="status">
-                <b>{chosen === q.answerIndex ? `Correct! +${q.xp} XP` : 'Not quite.'}</b>
+                <b>
+                  {chosen === q.answerIndex
+                    ? shown?.retry
+                      ? 'Correct. You fixed it.'
+                      : `Correct! +${q.xp} XP`
+                    : 'Not quite. This question will come back before the lesson ends.'}
+                </b>
                 <p>
                   <RichText text={q.explanation} />
                 </p>
-                <SourceLine provenance={q.provenance} demoText="Sample question, not checked against a PDF" />
+                <SourceLine
+                  provenance={q.provenance}
+                  demoText="Sample question, not checked against a PDF"
+                  unit={unit}
+                  source={sourceName}
+                />
               </div>
             )}
           </article>
           <div className="actionbar inline">
-            <button type="button" className="btn btn-outline" onClick={() => (qIdx > 0 ? goQuestion(qIdx - 1) : setStage('notes'))}>
-              <ArrowLeft size={18} /> {qIdx > 0 ? 'Previous' : 'Lesson'}
+            <button type="button" className="btn btn-outline" onClick={() => setStage('notes')}>
+              <ArrowLeft size={18} /> Lesson
             </button>
             {!checked ? (
               <button type="button" className="btn btn-gold" disabled={picked === null} onClick={check}>
@@ -307,17 +368,41 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               </button>
             ) : (
               <button type="button" className="btn btn-gold" onClick={afterQuestion}>
-                {qIdx < questions.length - 1 ? 'Next Question' : allAnswered ? 'Flashcards' : 'Next Question'} <ArrowRight size={18} />
+                {!quizDone ? 'Next Question' : cards.length > 0 ? 'Flashcards' : 'Finish Lesson'} <ArrowRight size={18} />
               </button>
             )}
           </div>
         </section>
       )}
 
-      {stage === 'cards' && (
+      {stage === 'quiz' && !q && (
+        <section className="pad lesson-body">
+          <article className="card quizcard">
+            <small className="stepcount">Quiz complete</small>
+            <h2>
+              {score} of {questions.length} correct on the first try
+            </h2>
+            <p className="muted">
+              {missedFirst > 0
+                ? `You corrected ${missedFirst === 1 ? 'the one you missed' : `all ${missedFirst} you missed`}. ${missedFirst === 1 ? 'It comes' : 'They come'} back in today's review.`
+                : 'Every answer was right the first time.'}
+            </p>
+          </article>
+          <div className="actionbar inline">
+            <button type="button" className="btn btn-outline" onClick={() => setStage('notes')}>
+              <ArrowLeft size={18} /> Lesson
+            </button>
+            <button type="button" className="btn btn-gold" onClick={() => (cards.length > 0 ? setStage('cards') : finish(ratings))}>
+              {cards.length > 0 ? 'Flashcards' : 'Finish Lesson'} <ArrowRight size={18} />
+            </button>
+          </div>
+        </section>
+      )}
+
+      {stage === 'cards' && card && (
         <section className="pad lesson-body">
           <small className="stepcount center">
-            Card {cardIdx + 1} of {section.flashcards.length} • tap the card to flip
+            Card {cardIdx + 1} of {cards.length} • say the answer to yourself, then flip
           </small>
           <button
             type="button"
@@ -338,55 +423,51 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
               {isDemo(card.provenance) ? (
                 <DemoTag />
               ) : (
-                card.provenance.citations[0] && <span className="pagechip">Page {card.provenance.citations[0].page}</span>
+                card.provenance.citations[0] && (
+                  <span className="pagechip">
+                    {unit === 'slide' ? 'Slide' : 'Page'} {card.provenance.citations[0].page}
+                  </span>
+                )
               )}
             </span>
           </button>
           <div className="dots" aria-hidden="true">
-            {section.flashcards.map((f, i) => (
+            {cards.map((f, i) => (
               <i key={f.id} className={i === cardIdx ? 'on' : ''} />
             ))}
           </div>
-          <div className="actionbar inline">
-            <button
-              type="button"
-              className="btn btn-outline"
-              disabled={cardIdx === 0}
-              onClick={() => {
-                setCardIdx(cardIdx - 1);
-                setFlipped(false);
-              }}
-            >
-              <ArrowLeft size={18} /> Previous
-            </button>
-            {cardIdx < section.flashcards.length - 1 ? (
+          {flipped ? (
+            <>
+              <p className="ratehint" id="rate-label">
+                How well did you know it? Your answer sets when this card comes back.
+              </p>
+              <div className="ratings" role="group" aria-labelledby="rate-label">
+                {RATINGS.map((r) => (
+                  <button key={r.grade} type="button" className={`btn rate rate-${r.grade}`} onClick={() => rate(r.grade)}>
+                    <b>{r.label}</b>
+                    <small>{r.hint}</small>
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <div className="actionbar inline">
               <button
                 type="button"
-                className="btn btn-gold"
+                className="btn btn-outline"
+                disabled={cardIdx === 0}
                 onClick={() => {
-                  setCardIdx(cardIdx + 1);
+                  setCardIdx(cardIdx - 1);
                   setFlipped(false);
                 }}
               >
-                Next Card <ArrowRight size={18} />
+                <ArrowLeft size={18} /> Previous
               </button>
-            ) : allAnswered ? (
-              <button type="button" className="btn btn-gold" onClick={finish}>
-                Finish Lesson <Check size={18} strokeWidth={3} />
+              <button type="button" className="btn btn-gold" onClick={() => setFlipped(true)}>
+                Show Answer <RotateCcw size={18} />
               </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-gold"
-                onClick={() => {
-                  setStage('quiz');
-                  goQuestion(Math.max(0, answers.findIndex((a) => a === null)));
-                }}
-              >
-                Finish the Quiz <ArrowRight size={18} />
-              </button>
-            )}
-          </div>
+            </div>
+          )}
         </section>
       )}
 
@@ -413,18 +494,45 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
                   <Star size={14} fill="currentColor" /> {awarded ? `+${awarded} XP` : 'Review complete'}
                 </span>
                 <span className="pill pill-outline">
-                  <Check size={14} strokeWidth={3} /> {score}/{questions.length} correct
+                  <Check size={14} strokeWidth={3} /> {score}/{questions.length} first try
                 </span>
               </div>
             </div>
             <LionMascot size={112} className="celebrate-lion" />
           </div>
 
+          <div className="card reviewplan">
+            <h2>
+              <CalendarClock size={20} className="c-purple" /> What happens next
+            </h2>
+            <p>
+              {dueToday > 0 ? (
+                <>
+                  <b>
+                    {dueToday} item{dueToday === 1 ? '' : 's'} you missed {dueToday === 1 ? 'is' : 'are'} ready to review
+                    again today.
+                  </b>{' '}
+                  Everything else comes back tomorrow, then at longer gaps each time you remember it.
+                </>
+              ) : (
+                <>
+                  <b>These questions and cards come back for review tomorrow</b>, then at longer gaps each time you
+                  remember them. Recalling them later is what makes them stick.
+                </>
+              )}
+            </p>
+            {dueToday > 0 && (
+              <Link href="/review" className="btn btn-outline">
+                <Repeat size={18} /> Review missed items
+              </Link>
+            )}
+          </div>
+
           <div className="card">
             <h2>Your answers</h2>
             <ul className="review">
               {questions.map((x, i) => {
-                const right = answers[i] === x.answerIndex;
+                const right = run.firstTry[i] === true;
                 return (
                   <li key={x.id} className={right ? 'right' : 'miss'}>
                     {right ? <CheckCircle2 size={20} /> : <XCircle size={20} />}
@@ -434,6 +542,7 @@ export function LessonPlayer({ course, section, index }: { course: Course; secti
                       </b>
                       <small>
                         Answer: <RichText text={x.choices[x.answerIndex]} />
+                        {!right && ' (missed at first, then corrected)'}
                       </small>
                     </span>
                   </li>

@@ -1,11 +1,12 @@
 'use client';
 
-import { ArrowRight, ArrowUp, BarChart3, CloudUpload, Flame, Play, Zap } from 'lucide-react';
+import { ArrowRight, ArrowUp, BarChart3, CloudUpload, Flame, Play, Repeat, Zap } from 'lucide-react';
 import Link from 'next/link';
-import { useAllCourses } from '@/lib/learning/generated-store';
+import { useAllCourses, useStudyCourses } from '@/lib/learning/generated-store';
 import { sectionPath } from '@/lib/learning/links';
 import type { CourseSummary } from '@/lib/learning/types';
 import { computeBadges } from '@/lib/progress/badges';
+import { dayIndex, dueItems } from '@/lib/progress/mastery';
 import { levelFor, sectionStatuses, useProgress } from '@/lib/progress/store';
 import { AppHeader } from './AppHeader';
 import { CourseCard } from './CourseCard';
@@ -22,7 +23,9 @@ function nextLessonHref(courses: CourseSummary[], state: ReturnType<typeof usePr
 }
 
 export function DashboardView({ courses: demoCourses }: { courses: CourseSummary[] }) {
-  const { state } = useProgress();
+  const { state, ready } = useProgress();
+  const study = useStudyCourses();
+  const dueNow = ready ? dueItems(study, state.review, dayIndex(new Date())).length : 0;
   // The student's PDF courses come first, then the sample courses.
   const { all: courses, generated } = useAllCourses(demoCourses);
   const level = levelFor(state.xp);
@@ -91,6 +94,18 @@ export function DashboardView({ courses: demoCourses }: { courses: CourseSummary
         <Link href={nextLessonHref(courses, state)} className="btn btn-gold btn-xl start-btn">
           <Play size={20} fill="currentColor" /> Start Learning <ArrowRight size={20} />
         </Link>
+        {dueNow > 0 && (
+          <Link href="/review" className="reviewcta">
+            <Repeat size={20} />
+            <span>
+              <b>
+                {dueNow} item{dueNow === 1 ? '' : 's'} due for review
+              </b>
+              A few minutes of recall now keeps earlier lessons from fading.
+            </span>
+            <ArrowRight size={18} />
+          </Link>
+        )}
         <p className="demo-line">
           <DemoTag />{' '}
           {generated.length > 0
@@ -101,7 +116,7 @@ export function DashboardView({ courses: demoCourses }: { courses: CourseSummary
         <div className="sectionhead">
           <h2>My Courses</h2>
           <Link href="/upload" className="chip-btn">
-            <CloudUpload size={18} /> Upload PDF
+            <CloudUpload size={18} /> Upload
           </Link>
         </div>
         <div className="stack">

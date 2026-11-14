@@ -21,20 +21,20 @@ import { generateAdaptiveCourse, unfinishedLessons } from '@/lib/learning/adapti
 import { checkBackend, LESSON_API_URL, LessonApiError, requestLesson, requestPlan } from '@/lib/learning/api';
 import type { ExtractedDocument, HealthResponse } from '@/lib/learning/contracts';
 import { summarizeCoverage } from '@/lib/learning/coverage';
+import { saveFigures, type FigureInput } from '@/lib/learning/figure-store';
 import { findGeneratedByDocument, saveGeneratedCourse } from '@/lib/learning/generated-store';
 import { coursePath } from '@/lib/learning/links';
 import type { Course } from '@/lib/learning/types';
-import { PdfFileError, readPdfFile } from '@/lib/pdf/browser';
-import { PdfExtractError } from '@/lib/pdf/extract';
-import { formatBytes, validatePdfMeta } from '@/lib/pdf/validate';
+import { formatBytes } from '@/lib/pdf/validate';
+import { checkSourceFile, readSourceFile, SourceFileError, sourceKindOf, type SourceFileKind } from '@/lib/source/browser';
 import { useProgress } from '@/lib/progress/store';
 import { AppHeader } from './AppHeader';
 
 const PIPELINE = [
-  { icon: FileSearch, title: 'Read the PDF on your device', body: 'Text is extracted page by page in your browser. The file itself is never uploaded.' },
-  { icon: BookOpenCheck, title: 'Plan lessons from the concepts', body: 'The concepts in your PDF decide how many lessons there are and their order. Each lesson is Beginner, Intermediate or Advanced.' },
-  { icon: Quote, title: 'Cite every item', body: 'Each note and question carries the page number and the quote it is based on.' },
-  { icon: ShieldCheck, title: 'Check against your PDF', body: 'Items whose quotes cannot be found in your PDF are removed. This lowers errors; it cannot rule them out.' },
+  { icon: FileSearch, title: 'Read the file on your device', body: 'Text is extracted page by page (or slide by slide) in your browser. The file itself is never uploaded.' },
+  { icon: BookOpenCheck, title: 'Plan lessons from the concepts', body: 'The concepts in your file decide how many lessons there are and their order. Each lesson is Beginner, Intermediate or Advanced.' },
+  { icon: Quote, title: 'Cite every item', body: 'Each note and question carries the page or slide number and the quote it is based on.' },
+  { icon: ShieldCheck, title: 'Check against your file', body: 'Items whose quotes cannot be found in your file are removed. This lowers errors; it cannot rule them out.' },
 ];
 
 type Backend = { state: 'checking' } | { state: 'off' } | { state: 'down' } | { state: 'up'; info: HealthResponse };
@@ -52,7 +52,9 @@ export function UploadView() {
   const { markPdfSelected } = useProgress();
   const input = useRef<HTMLInputElement>(null);
   const [backend, setBackend] = useState<Backend>({ state: LESSON_API_URL ? 'checking' : 'off' });
-  const [file, setFile] = useState<{ name: string; size: number } | null>(null);
+  const [file, setFile] = useState<{ name: string; size: number; kind: SourceFileKind } | null>(null);
+  /** Pictures from the slides, saved on this device when lessons are generated. */
+  const [figures, setFigures] = useState<FigureInput[]>([]);
   const [doc, setDoc] = useState<ExtractedDocument | null>(null);
   const [phase, setPhase] = useState<Phase>({ step: 'idle' });
   const [error, setError] = useState('');
@@ -76,6 +78,7 @@ export function UploadView() {
     stopper.current?.abort();
     setFile(null);
     setDoc(null);
+    setFigures([]);
     setError('');
     setPhase({ step: 'idle' });
     if (input.current) input.current.value = '';
@@ -86,20 +89,23 @@ export function UploadView() {
     const id = ++job.current;
     setError('');
     setDoc(null);
-    const meta = validatePdfMeta(picked);
-    if (!meta.ok) {
+    setFigures([]);
+    const problem = checkSourceFile(picked);
+    if (problem) {
       setFile(null);
       setPhase({ step: 'idle' });
-      setError(meta.message ?? 'That file cannot be used.');
+      setError(problem);
       return;
     }
-    setFile({ name: picked.name, size: picked.size });
+    setFile({ name: picked.name, size: picked.size, kind: sourceKindOf(picked) });
     setPhase({ step: 'reading', page: 0, total: 0 });
     try {
-      const extracted = await readPdfFile(picked, (page, total) => {
+      const source = await readSourceFile(picked, (page, total) => {
         if (job.current === id) setPhase({ step: 'reading', page, total });
       });
       if (job.current !== id) return;
+      const extracted = source.doc;
+      setFigures(source.figures);
       setDoc(extracted);
       markPdfSelected();
       const saved = findGeneratedByDocument(extracted.id);
@@ -108,11 +114,7 @@ export function UploadView() {
       if (job.current !== id) return;
       setPhase({ step: 'idle' });
       setFile(null);
-      setError(
-        err instanceof PdfExtractError || err instanceof PdfFileError
-          ? err.message
-          : 'This PDF could not be read. Try a different file.',
-      );
+      setError(err instanceof SourceFileError ? err.message : 'This file could not be read. Try a different file.');
     }
   };
 
@@ -136,6 +138,8 @@ export function UploadView() {
     stopper.current = controller;
     // Lessons saved earlier for this PDF stay in place until a new lesson exists to replace them.
     const previous = findGeneratedByDocument(doc.id);
+    // Slide pictures stay in this browser; lessons show them beside the notes that cite the slide.
+    if (figures.length > 0) void saveFigures(doc.id, figures);
     try {
       const result = await generateAdaptiveCourse({
         doc,
@@ -169,6 +173,8 @@ export function UploadView() {
   };
 
   const busy = phase.step === 'reading' || phase.step === 'generating';
+  const unit = file?.kind === 'pptx' ? 'slide' : 'page';
+  const Unit = file?.kind === 'pptx' ? 'Slide' : 'Page';
   const canGenerate = backend.state === 'up';
   const done = phase.step === 'done' ? phase.course : undefined;
   const report = done?.generation?.report;
@@ -189,8 +195,8 @@ export function UploadView() {
         <div className="hero-glow" aria-hidden="true" />
         <AppHeader />
         <div className="hero-title">
-          <h1>Upload a Course PDF</h1>
-          <p>Turn course material into lessons with three learning levels.</p>
+          <h1>Upload Course Material</h1>
+          <p>Turn a PDF or a PowerPoint into lessons with three learning levels.</p>
         </div>
       </section>
 
@@ -199,7 +205,7 @@ export function UploadView() {
           <div className="note note-warn">
             <WifiOff size={20} />
             <span>
-              <b>Lesson generation is not connected on this site yet.</b> You can still choose a PDF to check that its
+              <b>Lesson generation is not connected on this site yet.</b> You can still choose a file to check that its
               text can be read. Nothing is uploaded.
             </span>
           </div>
@@ -208,7 +214,7 @@ export function UploadView() {
           <div className="note note-warn" role="status">
             <WifiOff size={20} />
             <span>
-              <b>The lesson service is not reachable.</b> You can still read a PDF here; generating lessons will work
+              <b>The lesson service is not reachable.</b> You can still read a file here; generating lessons will work
               once the service is running.
             </span>
           </div>
@@ -217,9 +223,9 @@ export function UploadView() {
           <div className="note note-info" role="status">
             <ShieldCheck size={20} />
             <span>
-              <b>Your PDF file stays on this device.</b> Only its extracted text is sent to the lesson service
+              <b>Your file stays on this device.</b> Only its extracted text is sent to the lesson service
               {backend.info.provider === 'mock'
-                ? ', which is running in offline sample mode (no AI): lessons are built by copying sentences from your PDF.'
+                ? ', which is running in offline sample mode (no AI): lessons are built by copying sentences from your file.'
                 : ' to build the lessons.'}
             </span>
           </div>
@@ -230,12 +236,12 @@ export function UploadView() {
             <span className="drop-ico">
               <FileUp size={30} />
             </span>
-            <strong>Choose a PDF file</strong>
-            <small>Text-based PDF • up to 25 MB and 60 pages</small>
+            <strong>Choose a PDF or PowerPoint</strong>
+            <small>.pdf or .pptx with real text • up to 25 MB and 60 pages or slides</small>
             <input
               ref={input}
               type="file"
-              accept="application/pdf,.pdf"
+              accept="application/pdf,.pdf,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
               className="sr-only"
               onChange={(e) => void choose(e.target.files?.[0])}
             />
@@ -244,13 +250,13 @@ export function UploadView() {
           <div className="card filecard">
             <span className="pdfico pdfico-purple" aria-hidden="true">
               <FileText size={22} />
-              <b>PDF</b>
+              <b>{file.kind === 'pptx' ? 'PPT' : 'PDF'}</b>
             </span>
             <span className="filecard-body">
               <b>{file.name}</b>
               <small>
                 {formatBytes(file.size)}
-                {doc && ` • ${doc.pageCount} pages • ${doc.charCount.toLocaleString()} characters of text`}
+                {doc && ` • ${doc.pageCount} ${unit}s • ${doc.charCount.toLocaleString()} characters of text`}
               </small>
             </span>
             <button type="button" className="iconbtn subtle" onClick={reset} aria-label="Remove file" disabled={phase.step === 'generating'}>
@@ -270,8 +276,8 @@ export function UploadView() {
           <div className="card statuscard" role="status" aria-live="polite">
             <span className="spinner" aria-hidden="true" />
             <div>
-              <b>Reading your PDF…</b>
-              <small>{phase.total ? `Page ${phase.page} of ${phase.total}` : 'Opening the file'}</small>
+              <b>Reading your file…</b>
+              <small>{phase.total ? `${Unit} ${phase.page} of ${phase.total}` : 'Opening the file'}</small>
             </div>
           </div>
         )}
@@ -283,20 +289,26 @@ export function UploadView() {
                 <CheckCircle2 size={20} className="c-green" /> Text found
               </h2>
               <small>
-                {doc.pages.length} of {doc.pageCount} pages
+                {doc.pages.length} of {doc.pageCount} {unit}s
               </small>
             </div>
             <p className="excerpt">
-              <span className="pagechip">Page {doc.pages[0].page}</span> {doc.pages[0].text.slice(0, 220)}
+              <span className="pagechip">{Unit} {doc.pages[0].page}</span> {doc.pages[0].text.slice(0, 220)}
               {doc.pages[0].text.length > 220 && '…'}
             </p>
-            {doc.truncated && <p className="muted">This PDF is long, so only the first part of its text will be used.</p>}
+            {doc.truncated && <p className="muted">This file is long, so only the first part of its text will be used.</p>}
+            {figures.length > 0 && (
+              <p className="muted">
+                {plural(figures.length, 'picture')} found on the slides. They stay on this device and are shown beside
+                the lessons that cite their slide. Lessons are written from the slide text only.
+              </p>
+            )}
             <button type="button" className="btn btn-gold btn-xl gap-top" onClick={() => void generate()} disabled={!canGenerate}>
               <Sparkles size={20} /> Generate lessons
             </button>
             <p className="muted">
-              One request plans the lessons from the concepts in your PDF, then each lesson is written with its own
-              request. Longer PDFs take more requests and more time.
+              One request plans the lessons from the concepts in your file, then each lesson is written with its own
+              request. Longer files take more requests and more time.
             </p>
             {!canGenerate && <p className="muted">Generating needs the lesson service, which is not available right now.</p>}
           </div>
@@ -308,7 +320,7 @@ export function UploadView() {
             <div>
               <b>{phase.title}</b>
               <small>
-                {phase.detail} Each lesson is checked against your PDF and saved as soon as it is ready. Keep this
+                {phase.detail} Each lesson is checked against your file and saved as soon as it is ready. Keep this
                 page open.
               </small>
             </div>
@@ -333,14 +345,14 @@ export function UploadView() {
               <p className="muted">
                 {coverage.covered} of {plural(coverage.concepts, 'concept')} from the plan {coverage.covered === 1 ? 'has' : 'have'}{' '}
                 both an explanation and a practice question. {coverage.pagesTaught} of{' '}
-                {plural(coverage.pagesWithText, 'page')} with text {coverage.pagesTaught === 1 ? 'is' : 'are'} cited
-                {coverage.pagesOmitted.length > 0 && `; no lesson uses page${coverage.pagesOmitted.length === 1 ? '' : 's'} ${coverage.pagesOmitted.join(', ')}`}
+                {plural(coverage.pagesWithText, unit)} with text {coverage.pagesTaught === 1 ? 'is' : 'are'} cited
+                {coverage.pagesOmitted.length > 0 && `; no lesson uses ${unit}${coverage.pagesOmitted.length === 1 ? '' : 's'} ${coverage.pagesOmitted.join(', ')}`}
                 . The learning path lists anything that was left out.
               </p>
             )}
             {report && report.checked > 0 && (
               <p className="muted">
-                {report.kept} of {report.checked} generated items matched your PDF
+                {report.kept} of {report.checked} generated items matched your file
                 {report.dropped > 0 && `; ${report.dropped} were removed`}. This automated check reduces mistakes but
                 does not guarantee accuracy.
               </p>

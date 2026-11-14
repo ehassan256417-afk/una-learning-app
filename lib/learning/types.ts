@@ -132,6 +132,17 @@ export interface BudgetUse {
 /** Which part of the explanation a note gives. */
 export type NoteAspect = 'what' | 'why' | 'how' | 'example';
 
+/** The kind of file a course was built from. For a presentation, citation "pages" are slide numbers. */
+export type SourceKind = 'pdf' | 'pptx';
+
+/** The word for one unit of the source, for citations: "page" or "slide". */
+export const sourceUnit = (source: { sourceKind?: SourceKind }): 'page' | 'slide' =>
+  source.sourceKind === 'pptx' ? 'slide' : 'page';
+
+/** What to call the student's file in a sentence: "your PDF" or "your slides". */
+export const sourceName = (source: { sourceKind?: SourceKind }): 'PDF' | 'slides' =>
+  source.sourceKind === 'pptx' ? 'slides' : 'PDF';
+
 export type Provenance =
   | { kind: 'demo' }
   | { kind: 'pdf'; documentId: string; citations: SourceCitation[] };
@@ -213,6 +224,8 @@ export interface Course {
   provenance: Provenance;
   /** Present on courses generated from an uploaded PDF. */
   generation?: GenerationInfo;
+  /** Set on courses built from a presentation; absent means a PDF (or demo content). */
+  sourceKind?: SourceKind;
   /** Present on adaptively generated courses. `sections` holds only the lessons generated so far. */
   plan?: LessonPlan;
   lessonStates?: LessonState[];
@@ -232,6 +245,7 @@ export interface CourseSummary {
   sectionIds: string[];
   provenance: Provenance;
   generation?: GenerationInfo;
+  sourceKind?: SourceKind;
 }
 
 export const isDemo = (p: Provenance): p is { kind: 'demo' } => p.kind === 'demo';

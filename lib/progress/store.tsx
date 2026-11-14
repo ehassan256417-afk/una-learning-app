@@ -9,6 +9,7 @@ import { DEMO_COMPLETED_SECTIONS, DEMO_STARTING_STREAK, DEMO_STARTING_XP } from 
  * exist, replace the load/save pair with API calls; the hook API can stay.
  */
 
+import { applyGrades, dayIndex, type GradeEntry, type ReviewMap } from './mastery';
 import type { SectionResult } from './status';
 
 export { courseProgress, sectionKey, sectionStatuses } from './status';
@@ -23,6 +24,8 @@ export interface ProgressState {
   todayXp: number;
   completed: Record<string, SectionResult>;
   pdfSelected: boolean;
+  /** Spaced-review records for practised questions and flashcards (see `mastery.ts`). */
+  review: ReviewMap;
 }
 
 const STORAGE_KEY = 'una-learning:progress:v1';
@@ -61,10 +64,27 @@ function seedState(): ProgressState {
       DEMO_COMPLETED_SECTIONS.map((k) => [k, { score: 3, total: 3, xp: 0, demo: true } satisfies SectionResult]),
     ),
     pdfSelected: false,
+    review: {},
   };
 }
 
 const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+
+/** Counts today as a study day (which moves the streak) and adds XP. */
+function studied(prev: ProgressState, xp: number): Pick<ProgressState, 'xp' | 'todayXp' | 'streak' | 'lastStudyDay'> {
+  const today = dayKey(new Date());
+  const yesterday = dayKey(new Date(Date.now() - 86_400_000));
+  let streak = prev.streak;
+  if (prev.lastStudyDay !== today) {
+    streak = prev.lastStudyDay === null || prev.lastStudyDay === yesterday ? prev.streak + 1 : 1;
+  }
+  return {
+    xp: prev.xp + xp,
+    todayXp: (prev.lastStudyDay === today ? prev.todayXp : 0) + xp,
+    streak,
+    lastStudyDay: today,
+  };
+}
 
 function load(): ProgressState | null {
   try {
@@ -74,6 +94,8 @@ function load(): ProgressState | null {
     if (parsed?.version !== 1 || typeof parsed.xp !== 'number' || typeof parsed.completed !== 'object') return null;
     // A new day resets the "today" counter.
     if (parsed.lastStudyDay !== dayKey(new Date())) parsed.todayXp = 0;
+    // Progress saved before spaced review existed has no review records yet.
+    if (!parsed.review || typeof parsed.review !== 'object' || Array.isArray(parsed.review)) parsed.review = {};
     return parsed;
   } catch {
     return null;
@@ -86,6 +108,8 @@ interface ProgressApi {
   ready: boolean;
   /** Records a finished section. Returns the XP actually awarded (0 on replays). */
   completeSection(key: string, result: { score: number; total: number; xp: number }): number;
+  /** Records practice attempts for spaced review. Counts as studying today; `xp` is added as given. */
+  gradeItems(grades: GradeEntry[], xp?: number): void;
   setName(name: string): void;
   markPdfSelected(): void;
   resetDemo(): void;
@@ -117,12 +141,6 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
       const firstTime = !state.completed[key];
       const awarded = firstTime ? result.xp : 0;
       setState((prev) => {
-        const today = dayKey(new Date());
-        const yesterday = dayKey(new Date(Date.now() - 86_400_000));
-        let streak = prev.streak;
-        if (prev.lastStudyDay !== today) {
-          streak = prev.lastStudyDay === null || prev.lastStudyDay === yesterday ? prev.streak + 1 : 1;
-        }
         const previous = prev.completed[key];
         const best =
           previous && !previous.demo && previous.score > result.score
@@ -130,10 +148,7 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
             : { score: result.score, total: result.total, xp: previous ? previous.xp : result.xp };
         return {
           ...prev,
-          xp: prev.xp + (prev.completed[key] ? 0 : result.xp),
-          todayXp: (prev.lastStudyDay === today ? prev.todayXp : 0) + (prev.completed[key] ? 0 : result.xp),
-          streak,
-          lastStudyDay: today,
+          ...studied(prev, previous ? 0 : result.xp),
           completed: { ...prev.completed, [key]: best },
         };
       });
@@ -142,16 +157,26 @@ export function ProgressProvider({ children }: { children: React.ReactNode }) {
     [state.completed],
   );
 
+  const gradeItems = useCallback<ProgressApi['gradeItems']>((grades, xp = 0) => {
+    if (grades.length === 0) return;
+    setState((prev) => ({
+      ...prev,
+      ...studied(prev, xp),
+      review: applyGrades(prev.review, grades, dayIndex(new Date())),
+    }));
+  }, []);
+
   const api = useMemo<ProgressApi>(
     () => ({
       state,
       ready,
       completeSection,
+      gradeItems,
       setName: (name) => setState((p) => ({ ...p, name })),
       markPdfSelected: () => setState((p) => (p.pdfSelected ? p : { ...p, pdfSelected: true })),
       resetDemo: () => setState(seedState()),
     }),
-    [state, ready, completeSection],
+    [state, ready, completeSection, gradeItems],
   );
 
   return <ProgressContext.Provider value={api}>{children}</ProgressContext.Provider>;

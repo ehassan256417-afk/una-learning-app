@@ -5,10 +5,11 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { summarizeCoverage } from '@/lib/learning/coverage';
+import { deleteFigures } from '@/lib/learning/figure-store';
 import { deleteGeneratedCourse } from '@/lib/learning/generated-store';
 import { isGeneratedCourse, sectionPath } from '@/lib/learning/links';
 import type { Course } from '@/lib/learning/types';
-import { isDemo } from '@/lib/learning/types';
+import { isDemo, sourceName, sourceUnit } from '@/lib/learning/types';
 import { courseProgress, sectionStatuses, useProgress } from '@/lib/progress/store';
 import { AppHeader } from './AppHeader';
 import { DemoTag, ProgressBar, Sheet } from './ui';
@@ -74,7 +75,7 @@ export function PathView({ course }: { course: Course }) {
         <div className="hero-title">
           <p className="kicker">
             {fromPdf ? course.unitTitle : `${course.code} – ${course.title}`}{' '}
-            {isDemo(course.provenance) ? <DemoTag /> : <span className="demotag pdftag">Your PDF</span>}
+            {isDemo(course.provenance) ? <DemoTag /> : <span className="demotag pdftag">Your {sourceName(course)}</span>}
           </p>
           <h1>{fromPdf ? course.title : <>{course.unitLabel}: <span>{course.unitTitle}</span></>}</h1>
           <div className="progressline">
@@ -93,10 +94,10 @@ export function PathView({ course }: { course: Course }) {
             <ShieldCheck size={20} />
             <span>
               <b>
-                {report.kept} of {report.checked} generated items matched your PDF.
+                {report.kept} of {report.checked} generated items matched your {sourceName(course)}.
               </b>{' '}
               {report.dropped > 0 && `${report.dropped} that could not be matched were removed. `}
-              This is an automated check of quotes and page numbers. It reduces mistakes but cannot guarantee
+              This is an automated check of quotes and {sourceUnit(course)} numbers. It reduces mistakes but cannot guarantee
               accuracy, so compare with your course material.
               {course.generation?.provider === 'mock' && ' Built in offline sample mode (no AI).'}
             </span>
@@ -112,7 +113,7 @@ export function PathView({ course }: { course: Course }) {
               <b>
                 {coverage.covered} of {coverage.concepts} planned concepts have an explanation and a practice question.
               </b>{' '}
-              {coverage.pagesTaught} of {coverage.pagesWithText} pages with text are cited by a lesson.
+              {coverage.pagesTaught} of {coverage.pagesWithText} {sourceUnit(course)}s with text are cited by a lesson.
               {course.coverage.omissions.length > 0 ? (
                 <details className="omissions">
                   <summary>
@@ -156,7 +157,7 @@ export function PathView({ course }: { course: Course }) {
               ))}
             </ul>
             <p className="muted">
-              To generate {waiting.length === 1 ? 'it' : 'them'}, open Upload, choose the same PDF again and press
+              To generate {waiting.length === 1 ? 'it' : 'them'}, open Upload, choose the same file again and press
               “Generate the remaining lessons”. Your finished lessons and progress are kept.
             </p>
             <Link href="/upload" className="textlink">
@@ -227,8 +228,8 @@ export function PathView({ course }: { course: Course }) {
       )}
       <Sheet open={confirmRemove} onClose={() => setConfirmRemove(false)} title="Remove this course?">
         <p>
-          The lessons generated from this PDF will be deleted from this device. Your XP stays. To get them back you
-          would need to upload the PDF again.
+          The lessons generated from this file will be deleted from this device. Your XP stays. To get them back you
+          would need to upload the file again.
         </p>
         <div className="actionbar inline">
           <button type="button" className="btn btn-outline" onClick={() => setConfirmRemove(false)}>
@@ -238,6 +239,7 @@ export function PathView({ course }: { course: Course }) {
             type="button"
             className="btn btn-gold"
             onClick={() => {
+              if (course.provenance.kind === 'pdf') void deleteFigures(course.provenance.documentId);
               deleteGeneratedCourse(course.id);
               router.push('/courses');
             }}

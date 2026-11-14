@@ -1,6 +1,6 @@
 import type { ExtractedDocument, LessonGenerateRequest, LessonGenerateResponse, PlanResponse } from './contracts.ts';
 import { computeCoverage } from './coverage.ts';
-import type { BudgetUse, Course, GroundingReport, LessonPlan, LessonState, Section } from './types.ts';
+import type { BudgetUse, Course, GroundingReport, LessonPlan, LessonState, Section, SourceKind } from './types.ts';
 
 /**
  * Drives adaptive generation from the browser: one planning request, then one
@@ -90,6 +90,8 @@ export interface CourseMeta {
   provider: string;
   model: string;
   createdAt: string;
+  /** Set when the document is a presentation, so citations read "slide" instead of "page". */
+  sourceKind?: SourceKind;
 }
 
 /** Builds the saved course from the plan and whatever lessons exist so far, in plan order. */
@@ -103,12 +105,14 @@ export function assembleCourse(
 ): Course {
   const byId = new Map(sections.map((s) => [s.id, s]));
   const ordered = plan.lessons.map((l) => byId.get(l.id)).filter((s): s is Section => !!s);
-  const baseName = meta.documentName.replace(/\.pdf$/i, '').slice(0, 60) || 'Uploaded PDF';
+  const slides = meta.sourceKind === 'pptx';
+  const baseName =
+    meta.documentName.replace(/\.(pdf|pptx)$/i, '').slice(0, 60) || (slides ? 'Uploaded slides' : 'Uploaded PDF');
   return {
     id: `pdf-${meta.documentId.slice(0, 12)}`,
-    code: 'PDF',
+    code: slides ? 'Slides' : 'PDF',
     title: plan.title || baseName,
-    unitLabel: 'Your PDF',
+    unitLabel: slides ? 'Your slides' : 'Your PDF',
     unitTitle: baseName,
     pages: meta.pageCount,
     accent: 'gold',
@@ -124,6 +128,7 @@ export function assembleCourse(
     plan,
     lessonStates: states,
     coverage: computeCoverage(plan, ordered, states),
+    ...(slides ? { sourceKind: 'pptx' as const } : {}),
     ...(budget ? { budget } : {}),
   };
 }
@@ -158,6 +163,7 @@ export async function generateAdaptiveCourse(options: AdaptiveOptions): Promise<
       provider: resume.generation?.provider ?? 'unknown',
       model: resume.generation?.model ?? 'unknown',
       createdAt: resume.generation?.createdAt ?? now(),
+      sourceKind: resume.sourceKind ?? doc.sourceKind,
     };
     budget = resume.budget;
     report = resume.generation?.report ?? EMPTY_REPORT;
@@ -175,6 +181,7 @@ export async function generateAdaptiveCourse(options: AdaptiveOptions): Promise<
       provider: planned.provider,
       model: planned.model,
       createdAt: now(),
+      sourceKind: doc.sourceKind,
     };
   }
 

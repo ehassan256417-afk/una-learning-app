@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import { DEMO_COURSES } from './demo-data';
 import { summarizeCourse } from './engine';
 import type { Course, CourseSummary } from './types';
 
@@ -90,4 +91,10 @@ export function useAllCourses(demo: CourseSummary[]): { all: CourseSummary[]; ge
     const generated = courses.map(summarizeCourse);
     return { all: [...generated, ...demo], generated };
   }, [courses, demo]);
+}
+
+/** Every course with its full lessons (the student's first), for review and mastery screens. */
+export function useStudyCourses(): Course[] {
+  const { courses } = useGeneratedCourses();
+  return useMemo(() => [...courses, ...DEMO_COURSES], [courses]);
 }

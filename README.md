@@ -1,6 +1,6 @@
 # UNA Learning
 
-Mobile-first study app that turns course PDFs into short lessons, quizzes and flashcards.
+Mobile-first study app that turns course PDFs and PowerPoint slides into short lessons, quizzes and flashcards, then brings them back for spaced review.
 
 Independent student project for UNA students. **Not affiliated with or endorsed by the University of North Alabama.** The lion mascot is original artwork; no official university marks are used.
 
@@ -13,6 +13,9 @@ Live demo (static frontend): https://ehassan256417-afk.github.io/una-learning-ap
 | Dashboard, learning path, pre-lesson, lesson, quiz, flashcards, progress, profile | Working, with demo courses labeled "Demo" |
 | PDF upload with validation (type, size, file signature, page limit, scanned-PDF detection) | Working in the browser |
 | PDF text extraction with page numbers | Working in the browser; the file never leaves the device |
+| PowerPoint (.pptx) extraction: slide text, tables, speaker notes, slide numbers | Working in the browser; the file never leaves the device |
+| Pictures from slides shown beside the notes that cite the slide | Working. Stored on the device only; no model looks at them |
+| Mastery loop, flashcard self-rating, spaced review, weak-concept tracking | Working, stored on the device |
 | Lesson backend (`server/`) with provider abstraction | Working locally |
 | Offline sample provider (no AI, no key) | Working, used by tests and local development |
 | ZRO provider (primary, `deepseek-v4.1-flash`) | Implemented from the ZRO API reference and unit-tested against a mocked API. **Not yet run against the real API** (needs a key) |
@@ -38,7 +41,7 @@ To use real AI, copy `server/.env.example` to `.env` in the project root and set
 `node scripts/validate-provider.ts zro biology` runs the pipeline against the live provider with a synthetic sample PDF and writes a report (timing, token usage, kept and dropped items) to the git-ignored `.claude/validation/`. It makes real API calls, so run it on purpose.
 
 ```bash
-npm test           # 111 tests, Node's built-in runner
+npm test           # 184 tests, Node's built-in runner
 npm run lint       # TypeScript check
 npm run build      # production build
 ```
@@ -65,10 +68,35 @@ opened via /my?c=...                            return verified course
 app/                 routes; /my opens PDF courses from browser storage
 components/          screens and shared UI
 lib/pdf/             validation and page-level text extraction
+lib/pptx/            .pptx validation and slide-level extraction (text, tables, notes, pictures)
+lib/source/          one entry point that reads either file type in the browser
+lib/progress/        XP, streak, unlocking, and mastery / spaced review (`mastery.ts`)
 lib/learning/        types, API contracts, grounding verification, browser store
 server/              HTTP API, generation pipeline, providers, request guards
 tests/               unit and end-to-end tests with sample PDFs (biology, history, computing)
 ```
+
+## PowerPoint slides
+
+A `.pptx` is read on the device by `lib/pptx/extract.ts`. Slide N becomes "page" N, so the same plan, lesson and grounding pipeline runs unchanged and citations read "Slide 4". Per slide it keeps the title and body text, tables (cells joined with ` | `, rows with `; `), text in grouped shapes, and speaker notes (prefixed "Speaker notes:"). Footers, dates and slide numbers are dropped.
+
+Pictures placed on a slide (PNG, JPEG, GIF, WebP; checked by file signature) are saved in the browser's IndexedDB and shown under the lesson notes that cite that slide, with a caption saying the explanation was written from the slide's text. **The pictures are not sent to the lesson service and no model interprets them.**
+
+The file is untrusted input. The reader inflates only the parts it needs, refuses declared sizes over 5 MB per XML part, 3 MB per picture or 80 MB in total, archives with more than 5,000 entries or duplicate entry names, and parts with unclosed tags; relationship targets that are external or leave the archive are ignored.
+
+Not read: charts, SmartArt stored in separate parts, EMF/WMF/SVG pictures, pictures used as a shape fill, old `.ppt` files (the app asks for `.pptx`). A deck that is mostly pictures is rejected as having too little text.
+
+## Mastery and spaced review
+
+`lib/progress/mastery.ts` holds the rules; they are pure functions with their own tests.
+
+- **In a lesson**, a missed question comes back at the end of the quiz until it is answered correctly, so a lesson cannot be finished with a mistake left uncorrected. The score and XP count first attempts only.
+- **Flashcards** are self-rated Again / Good / Easy after flipping.
+- **After a lesson**, every question and card gets a review record (Leitner boxes, gaps of 1, 3, 7, 16, 35 and 75 days). A miss sends the item back to the start and makes it due the same day. Practising an item before it is due cannot move it up.
+- **`/review`** runs a short session (up to 15 items, missed items first) across all courses. Home and Progress show how many items are due.
+- **Progress** groups questions by planned concept and shows weak, learning and strong counts, with links to the lessons behind weak concepts.
+
+Records are stored with the rest of the progress in `localStorage`; progress saved before this feature loads unchanged.
 
 ## Adaptive lesson generation
 
@@ -134,7 +162,9 @@ After that, build the frontend with `NEXT_PUBLIC_LESSON_API_URL` set to the back
 
 ## Known limits
 
-- Scanned or image-only PDFs are not supported (no OCR).
+- Scanned or image-only PDFs and picture-only slide decks are not supported (no OCR).
+- Diagrams and pictures are shown from slides but not understood: lessons are written from text only. Pictures inside PDFs are not extracted yet.
+- Server messages and the stored coverage notes still say "page" and "PDF" for slide courses.
 - Limits: 25 MB, 60 pages, 150,000 characters; long documents are trimmed before generation.
 - Lessons are per device; there are no accounts or sync.
 - Demo courses and starting stats are sample content.

@@ -26,6 +26,7 @@ export const summarizeCourse = (c: Course): CourseSummary => ({
   sectionIds: c.sections.map((s) => s.id),
   provenance: c.provenance,
   generation: c.generation,
+  ...(c.sourceKind ? { sourceKind: c.sourceKind } : {}),
 });
 
 export const demoEngine: LearningEngine = {

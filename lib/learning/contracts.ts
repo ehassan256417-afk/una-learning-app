@@ -1,4 +1,6 @@
-import type { BudgetUse, Course, GroundingReport, LessonPlan, PlanConcept, PlannedLesson, Section } from './types.ts';
+import type { BudgetUse, Course, GroundingReport, LessonPlan, PlanConcept, PlannedLesson, Section, SourceKind } from './types.ts';
+
+export type { SourceKind };
 
 /**
  * Shapes shared by the static frontend and the lesson backend.
@@ -30,6 +32,8 @@ export interface ExtractedDocument {
   pages: ExtractedPage[];
   charCount: number;
   truncated?: boolean;
+  /** Where the text came from. Absent means a PDF. For a presentation, `page` is the slide number. */
+  sourceKind?: SourceKind;
 }
 
 export interface GenerateRequest {

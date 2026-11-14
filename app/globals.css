@@ -2420,3 +2420,210 @@ mark {
     transition: none !important;
   }
 }
+
+/* ---------- Mastery: retry pill, flashcard ratings, review, source figures ---------- */
+.pill-retry {
+  background: #fff1e6;
+  color: #b4530a;
+}
+.ratehint {
+  margin: 14px 0 8px;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.ratings {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.btn.rate {
+  flex-direction: column;
+  gap: 2px;
+  min-height: 58px;
+  padding: 8px 6px;
+  background: #fff;
+  border: 2px solid var(--line);
+  color: var(--ink);
+}
+.btn.rate small {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.btn.rate-again {
+  border-color: #f3b4b4;
+}
+.btn.rate-again b {
+  color: var(--red);
+}
+.btn.rate-good {
+  border-color: var(--p400);
+}
+.btn.rate-good b {
+  color: var(--p600);
+}
+.btn.rate-easy {
+  border-color: #9ad5ae;
+}
+.btn.rate-easy b {
+  color: var(--green);
+}
+.c-purple {
+  color: var(--p600);
+}
+.reviewplan h2,
+.reviewintro h2,
+.masterycard h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.reviewplan p,
+.reviewintro p {
+  margin: 8px 0 12px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #3b2a63;
+}
+.reviewintro p.muted {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.reviewbar {
+  margin-bottom: 12px;
+}
+.reviewbar small {
+  display: block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.reviewcta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: #f1eafc;
+  border: 1px solid var(--p200);
+  color: #3b2a63;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.reviewcta > svg {
+  flex: none;
+  color: var(--p600);
+}
+.reviewcta span {
+  flex: 1;
+}
+.reviewcta b {
+  display: block;
+  font-size: 14px;
+  color: var(--ink);
+}
+.masterybar {
+  display: flex;
+  height: 10px;
+  margin: 10px 0 8px;
+  border-radius: 99px;
+  overflow: hidden;
+  background: var(--p100);
+}
+.masterybar i {
+  display: block;
+}
+.masterybar .m-weak {
+  background: var(--red);
+}
+.masterybar .m-learning {
+  background: var(--g500);
+}
+.masterybar .m-strong {
+  background: var(--green);
+}
+.masterykey {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.masterykey span::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.masterykey .m-weak {
+  color: var(--red);
+}
+.masterykey .m-learning {
+  color: var(--g700);
+}
+.masterykey .m-strong {
+  color: var(--green);
+}
+.weaklist {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.weaklist li + li {
+  margin-top: 8px;
+}
+.weaklist a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fdf1f1;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.weaklist small {
+  display: block;
+  font-weight: 500;
+  color: var(--muted);
+}
+.figures {
+  margin-top: 14px;
+}
+.figures figure {
+  margin: 0 0 8px;
+}
+.figures img {
+  display: block;
+  max-width: 100%;
+  max-height: 320px;
+  margin: 0 auto;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.figures figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--p600);
+}
+.figures-note {
+  display: block;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
