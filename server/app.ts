@@ -18,6 +18,10 @@ import { checkLessonInput, createLesson, LESSON_CHAR_BUDGET, LESSON_VERSION, typ
 import { createPlan, PLAN_CHAR_BUDGET, PLAN_VERSION } from './plan.ts';
 import { PROMPT_VERSION } from './prompt.ts';
 import { ProviderError, type AiProvider, type TokenUsage } from './providers/types.ts';
+import { bearerToken, clientAddress, HttpError, readBody } from './http.ts';
+import type { UserRow } from './accounts.ts';
+import type { AiLogStart, Platform } from './platform.ts';
+import { createPlatformRoutes } from './routes.ts';
 import { isAllowedOrigin, RateLimiter, TtlCache } from './security.ts';
 
 /**
@@ -27,7 +31,9 @@ import { isAllowedOrigin, RateLimiter, TtlCache } from './security.ts';
  * - Document text is processed in memory only. It is never written to disk and never logged.
  * - Generated lessons are cached in memory (bounded, with expiry) keyed by a hash of the text.
  * - Browser access is limited to an origin allow-list, requests are size-capped and rate-limited.
- * - There is NO user authentication yet. That must be added before any public deployment.
+ * - With a `platform` (accounts and a database), every AI request needs a signed-in student, is
+ *   counted against that student's limits and is written to the AI request log. Without one
+ *   (tests, the validation scripts) the lesson endpoints stay anonymous: never deploy that mode.
  */
 
 export interface AppOptions {
@@ -45,6 +51,12 @@ export interface AppOptions {
   planMaxTokens?: number;
   lessonMaxTokens?: number;
   log?: (line: string) => void;
+  /** Accounts, saved learning data, activity and the owner API. See the note above. */
+  platform?: Platform;
+  /** Builds a provider for a model name chosen in the owner's settings. */
+  providerFor?: (model: string) => AiProvider;
+  /** Set when the server sits behind a reverse proxy that adds X-Forwarded-For. */
+  trustProxy?: boolean;
 }
 
 /** Characters of fixed instructions sent with every request, for the worst-case token estimate. */
@@ -114,69 +126,68 @@ const requestSchema = z.object({
   }),
 });
 
-class HttpError extends Error {
-  status: number;
-  code: ApiErrorCode;
-  headers: Record<string, string>;
-
-  constructor(status: number, code: ApiErrorCode, message: string, headers: Record<string, string> = {}) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.headers = headers;
-  }
-}
-
-function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    let done = false;
-    req.on('data', (chunk: Buffer) => {
-      if (done) return;
-      size += chunk.length;
-      if (size > maxBytes) {
-        done = true;
-        req.resume();
-        reject(new HttpError(413, 'too_large', 'The document is too large to process.'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => !done && resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', () => !done && reject(new HttpError(400, 'invalid_request', 'The request could not be read.')));
-  });
-}
-
 export function createApp(options: AppOptions): RequestListener {
-  const { provider, allowedOrigins } = options;
+  const { allowedOrigins, platform } = options;
+  const trustProxy = options.trustProxy ?? false;
   const limiter = new RateLimiter(options.rateLimit?.max ?? 6, options.rateLimit?.windowMs ?? 10 * 60_000);
   const cache = new TtlCache<Course>(options.cache?.maxEntries ?? 50, options.cache?.ttlMs ?? 24 * 60 * 60_000);
   const inFlight = new Map<string, Promise<Course>>();
   const dailyCap = options.dailyGenerationCap ?? 200;
 
   // Adaptive generation: one plan request plus one request per lesson, inside a per-course budget.
-  const courseBudget = options.courseBudget ?? { maxRequests: 12, maxTokens: 120_000 };
-  const budgets = new CourseBudgets(courseBudget);
+  const baseBudget = options.courseBudget ?? { maxRequests: 12, maxTokens: 120_000 };
+  const budgets = new CourseBudgets(baseBudget);
+  /** The course budget in force: the owner's settings when there is a platform, else the server's options. */
+  const courseBudget = (): BudgetLimits => {
+    if (!platform) return baseBudget;
+    const { courseMaxRequests, courseMaxTokens } = platform.settings().limits;
+    const limits = { maxRequests: courseMaxRequests, maxTokens: courseMaxTokens };
+    budgets.setLimits(limits);
+    return limits;
+  };
   // One request is the plan, and one is kept spare so a failed lesson can be requested again.
-  const maxLessons = Math.max(1, courseBudget.maxRequests - 2);
+  const maxLessons = () => Math.max(1, courseBudget().maxRequests - 2);
   const planMaxTokens = options.planMaxTokens ?? 8_000;
   const lessonMaxTokens = options.lessonMaxTokens ?? 6_000;
   const cacheTtl = options.cache?.ttlMs ?? 24 * 60 * 60_000;
   const planCache = new TtlCache<LessonPlan>(options.cache?.maxEntries ?? 50, cacheTtl);
   const lessonCache = new TtlCache<LessonResult>(300, cacheTtl);
-  /** Courses (client plus document) this server has planned, which gives their lessons a budget of their own. */
+  /** Courses (caller plus document) this server has planned, which gives their lessons a budget of their own. */
   const plannedCourses = new TtlCache<true>(5000, cacheTtl);
   const plansInFlight = new Map<string, Promise<LessonPlan>>();
   const lessonsInFlight = new Map<string, Promise<LessonResult>>();
   // Lesson requests are bounded by the course budget; this only stops a client hammering the endpoint.
   const lessonLimiter = new RateLimiter(
-    (options.rateLimit?.max ?? 6) * courseBudget.maxRequests,
+    (options.rateLimit?.max ?? 6) * (platform ? 60 : baseBudget.maxRequests),
     options.rateLimit?.windowMs ?? 10 * 60_000,
   );
   let day = '';
   let generationsToday = 0;
   const log = options.log ?? (() => undefined);
+  const httpStats = { total: 0, clientErrors: 0, serverErrors: 0 };
+
+  /** The provider in use: the server's own, or one built for the model the owner picked in settings. */
+  const modelProviders = new Map<string, AiProvider>();
+  const activeProvider = (): AiProvider => {
+    const model = platform?.settings().ai.model;
+    if (!model || !options.providerFor || model === options.provider.model) return options.provider;
+    let chosen = modelProviders.get(model);
+    if (!chosen) {
+      chosen = options.providerFor(model);
+      modelProviders.set(model, chosen);
+    }
+    return chosen;
+  };
+
+  const platformRoutes = platform
+    ? createPlatformRoutes(platform, {
+        provider: () => {
+          const p = activeProvider();
+          return { id: p.id, model: p.model };
+        },
+        httpStats,
+      })
+    : null;
 
   const send = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {
     res.writeHead(status, {
@@ -188,22 +199,41 @@ export function createApp(options: AppOptions): RequestListener {
     res.end(JSON.stringify(body));
   };
 
-  /** Shared entry checks: JSON content type, per-client rate limit, size-capped body. */
-  async function readJson(req: IncomingMessage, gate: RateLimiter): Promise<{ json: unknown; client: string }> {
+  /** Who is asking for AI work. Limits and budgets are tied to `key`. */
+  interface Caller {
+    key: string;
+    user?: UserRow;
+  }
+
+  /**
+   * With a platform, AI work needs a signed-in student and is tied to their
+   * account, so students behind one campus address do not share a limit.
+   * Without one, the caller is the network address (tests and local scripts).
+   */
+  function callerOf(req: IncomingMessage, user: UserRow | undefined): Caller {
+    if (!platform) return { key: clientAddress(req, trustProxy) };
+    if (!user) throw new HttpError(401, 'unauthorized', 'Sign in to create lessons.');
+    if (!platform.settings().features.generation) {
+      throw new HttpError(503, 'feature_disabled', 'Creating lessons is switched off at the moment. Your saved lessons still work.');
+    }
+    return { key: user.id, user };
+  }
+
+  /** Shared entry checks: JSON content type, per-caller rate limit, size-capped body. */
+  async function readJson(req: IncomingMessage, gate: RateLimiter, who: Caller): Promise<unknown> {
     if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
       throw new HttpError(415, 'invalid_request', 'Send the document as JSON.');
     }
-    const client = req.socket.remoteAddress ?? 'unknown';
-    const limit = gate.check(client);
+    const limit = gate.check(who.key);
     if (!limit.ok) {
       throw new HttpError(429, 'rate_limited', `Too many requests. Try again in ${limit.retryAfterSec} seconds.`, {
         'retry-after': String(limit.retryAfterSec),
       });
     }
     try {
-      return { json: JSON.parse(await readBody(req, LIMITS.maxBodyBytes)), client };
+      return JSON.parse(await readBody(req, LIMITS.maxBodyBytes)) as unknown;
     } catch (err) {
-      if (err instanceof HttpError) throw err;
+      if (err instanceof HttpError) throw new HttpError(err.status, err.code, 'The document is too large to process.');
       throw new HttpError(400, 'invalid_request', 'The request body is not valid JSON.');
     }
   }
@@ -227,8 +257,22 @@ export function createApp(options: AppOptions): RequestListener {
     return { document, chars: checkPages(document.pages, LIMITS.minChars) };
   }
 
-  /** Counts one AI call against the daily cap, or refuses it. */
-  function countAiCall() {
+  /**
+   * Counts one AI call against the daily limits, or refuses it. With a platform
+   * the count is the AI request log itself, so it survives a restart and is the
+   * same number the owner sees; a request that is refused is not counted.
+   */
+  function countAiCall(who: Caller) {
+    if (platform) {
+      const { dailyAiRequests, userDailyAiRequests } = platform.settings().limits;
+      if (platform.aiCountToday() >= dailyAiRequests) {
+        throw new HttpError(503, 'provider_rate_limited', 'The daily lesson limit has been reached. Try again tomorrow.');
+      }
+      if (who.user && platform.aiCountToday(who.user.id) >= userDailyAiRequests) {
+        throw new HttpError(429, 'limit_reached', `You have used all ${userDailyAiRequests} AI requests for today. The count resets at midnight UTC.`);
+      }
+      return;
+    }
     const today = new Date().toISOString().slice(0, 10);
     if (today !== day) {
       day = today;
@@ -240,48 +284,97 @@ export function createApp(options: AppOptions): RequestListener {
     generationsToday++;
   }
 
+  const failureOf = (err: unknown): { code: string; message: string } => {
+    if (err instanceof HttpError || err instanceof GenerationError) return { code: err.code, message: err.message };
+    if (err instanceof ProviderError) return { code: `provider_${err.code}`, message: err.message };
+    return { code: 'unexpected', message: 'Unexpected error.' };
+  };
+
+  /** Runs one provider request and, with a platform, writes its outcome, timing and tokens to the AI log. */
+  async function tracked<T>(
+    start: AiLogStart,
+    run: (onUsage: (u: TokenUsage) => void) => Promise<T>,
+    after?: (tokens: number) => void,
+  ): Promise<T> {
+    // Written as "running" before the provider is called, so it counts against the daily limits at once.
+    const logId = platform?.beginAi(start);
+    const began = Date.now();
+    const seen: { usage?: TokenUsage } = {};
+    const finish = (status: 'ok' | 'failed', failure?: { code: string; message: string }) => {
+      if (logId === undefined) return;
+      platform?.finishAi(logId, {
+        status,
+        promptTokens: seen.usage?.promptTokens,
+        outputTokens: seen.usage?.outputTokens,
+        tokensEstimated: seen.usage ? !!seen.usage.estimated : false,
+        durationMs: Date.now() - began,
+        errorCode: failure?.code,
+        errorMessage: failure?.message,
+      });
+    };
+    try {
+      const result = await run((u) => {
+        seen.usage = u;
+      });
+      finish('ok');
+      return result;
+    } catch (err) {
+      finish('failed', failureOf(err));
+      throw err;
+    } finally {
+      after?.(seen.usage ? seen.usage.promptTokens + seen.usage.outputTokens : 0);
+    }
+  }
+
   /**
    * Runs one AI request inside the course budget. The request is refused,
    * without calling the provider, if its worst case does not fit.
    */
   async function spend<T>(
+    who: Caller,
+    start: AiLogStart,
     budgetKey: string,
     worstCaseTokens: number,
     run: (onUsage: (u: TokenUsage) => void) => Promise<T>,
   ): Promise<T> {
-    // The daily cap is checked first so a refusal there does not use up the course budget.
-    countAiCall();
     let settle: (tokens: number) => void;
     try {
-      settle = budgets.begin(budgetKey, worstCaseTokens);
+      // The daily cap is checked first so a refusal there does not use up the course budget.
+      countAiCall(who);
+      try {
+        settle = budgets.begin(budgetKey, worstCaseTokens);
+      } catch (err) {
+        if (!platform) generationsToday--;
+        if (err instanceof BudgetError) throw new HttpError(429, 'budget_exhausted', err.message);
+        throw err;
+      }
     } catch (err) {
-      generationsToday--;
-      if (err instanceof BudgetError) throw new HttpError(429, 'budget_exhausted', err.message);
+      // Refusals are logged for the owner, but never counted as spend.
+      if (err instanceof HttpError) platform?.logAiOutcome(start, { refused: err.code, message: err.message });
       throw err;
     }
-    let used = 0;
-    try {
-      return await run((u) => {
-        used = u.promptTokens + u.outputTokens;
-      });
-    } finally {
-      settle(used);
-    }
+    return tracked(start, run, (tokens) => settle(tokens));
   }
 
-  async function handleGenerate(req: IncomingMessage): Promise<GenerateResponse> {
-    const { json } = await readJson(req, limiter);
-    const { document } = parseDocument(json);
+  async function handleGenerate(req: IncomingMessage, user: UserRow | undefined): Promise<GenerateResponse> {
+    const who = callerOf(req, user);
+    const provider = activeProvider();
+    const { document } = parseDocument(await readJson(req, limiter, who));
 
     // The cache key comes from the text itself, so a client cannot poison another document's entry.
-    const key = `${await documentIdFor(document.pages)}|${provider.id}|${provider.model}|${PROMPT_VERSION}`;
+    const documentId = await documentIdFor(document.pages);
+    const key = `${documentId}|${provider.id}|${provider.model}|${PROMPT_VERSION}`;
+    const start: AiLogStart = { userId: user?.id ?? null, kind: 'course', provider: provider.id, model: provider.model, documentId };
     const cached = cache.get(key);
-    if (cached) return { course: cached, cached: true };
+    if (cached) {
+      platform?.logAiOutcome(start, { cached: true });
+      return { course: cached, cached: true };
+    }
 
     let pending = inFlight.get(key);
     if (!pending) {
-      countAiCall();
-      pending = generateCourse(document, provider).finally(() => inFlight.delete(key));
+      countAiCall(who);
+      pending = tracked(start, () => generateCourse(document, provider)).finally(() => inFlight.delete(key));
       inFlight.set(key, pending);
     }
     const course = await pending;
@@ -290,12 +383,15 @@ export function createApp(options: AppOptions): RequestListener {
   }
 
   /** Adaptive stage 1: one AI request that returns a verified lesson plan. */
-  async function handlePlan(req: IncomingMessage): Promise<PlanResponse> {
-    const { json, client } = await readJson(req, limiter);
-    const { document, chars } = parseDocument(json);
+  async function handlePlan(req: IncomingMessage, user: UserRow | undefined): Promise<PlanResponse> {
+    const who = callerOf(req, user);
+    const provider = activeProvider();
+    const { document, chars } = parseDocument(await readJson(req, limiter, who));
     const documentId = await documentIdFor(document.pages);
-    const budgetKey = `${client}|${documentId}`;
-    const key = `${documentId}|${provider.id}|${provider.model}|${PLAN_VERSION}|${maxLessons}`;
+    const budgetKey = `${who.key}|${documentId}`;
+    const lessons = maxLessons();
+    const key = `${documentId}|${provider.id}|${provider.model}|${PLAN_VERSION}|${lessons}`;
+    const start: AiLogStart = { userId: user?.id ?? null, kind: 'plan', provider: provider.id, model: provider.model, documentId };
     const respond = (plan: LessonPlan, cached: boolean): PlanResponse => ({
       documentId,
       plan,
@@ -308,14 +404,17 @@ export function createApp(options: AppOptions): RequestListener {
     // Lesson requests for this document may now draw on this course's budget.
     plannedCourses.set(budgetKey, true);
     const cached = planCache.get(key);
-    if (cached) return respond(cached, true);
-    // Requests are shared only within one client's course, so nobody inherits another client's budget refusal.
+    if (cached) {
+      platform?.logAiOutcome(start, { cached: true });
+      return respond(cached, true);
+    }
+    // Requests are shared only within one caller's course, so nobody inherits another caller's budget refusal.
     const flight = `${budgetKey}|${key}`;
     let pending = plansInFlight.get(flight);
     if (!pending) {
       const worstCase = estimateTokens(Math.min(chars, PLAN_CHAR_BUDGET) + PROMPT_OVERHEAD_CHARS) + planMaxTokens;
-      pending = spend(budgetKey, worstCase, (onUsage) =>
-        createPlan(document, provider, { maxLessons, maxTokens: planMaxTokens, onUsage }),
+      pending = spend(who, start, budgetKey, worstCase, (onUsage) =>
+        createPlan(document, provider, { maxLessons: lessons, maxTokens: planMaxTokens, onUsage }),
       )
         .then((r) => r.plan)
         .finally(() => plansInFlight.delete(flight));
@@ -327,9 +426,11 @@ export function createApp(options: AppOptions): RequestListener {
   }
 
   /** Adaptive stage 2: one AI request that writes one planned lesson from its own pages. */
-  async function handleLesson(req: IncomingMessage): Promise<LessonGenerateResponse> {
-    const { json, client } = await readJson(req, lessonLimiter);
-    const parsed = lessonRequestSchema.safeParse(json);
+  async function handleLesson(req: IncomingMessage, user: UserRow | undefined): Promise<LessonGenerateResponse> {
+    const who = callerOf(req, user);
+    const provider = activeProvider();
+    courseBudget();
+    const parsed = lessonRequestSchema.safeParse(await readJson(req, lessonLimiter, who));
     if (!parsed.success) throw new HttpError(400, 'invalid_request', 'The lesson request is missing or malformed.');
     const body = parsed.data;
     const chars = checkPages(body.pages, 1);
@@ -339,15 +440,23 @@ export function createApp(options: AppOptions): RequestListener {
       throw new HttpError(400, 'invalid_request', 'The lesson plan does not match the document text.');
     }
 
-    // The document id comes from the browser here. Only an id this server planned for this client gets
+    // The document id comes from the browser here. Only an id this server planned for this caller gets
     // its own budget; any other id shares one budget, so inventing ids does not unlock more requests.
-    const courseKey = `${client}|${body.documentId}`;
-    const budgetKey = plannedCourses.get(courseKey) ? courseKey : `${client}|unplanned`;
+    const courseKey = `${who.key}|${body.documentId}`;
+    const budgetKey = plannedCourses.get(courseKey) ? courseKey : `${who.key}|unplanned`;
     // Everything that reaches the prompt or the stored lesson is part of the cache key.
     const digest = createHash('sha256')
       .update(JSON.stringify([body.documentId, body.documentName, body.pages, body.lesson, body.concepts, input.taught, lessonMaxTokens]))
       .digest('hex');
     const key = `${digest}|${provider.id}|${provider.model}|${LESSON_VERSION}`;
+    const start: AiLogStart = {
+      userId: user?.id ?? null,
+      kind: 'lesson',
+      provider: provider.id,
+      model: provider.model,
+      documentId: body.documentId,
+      lessonTitle: body.lesson.title,
+    };
     const respond = (result: LessonResult, cached: boolean): LessonGenerateResponse => ({
       ...result,
       cached,
@@ -355,12 +464,15 @@ export function createApp(options: AppOptions): RequestListener {
     });
 
     const cached = lessonCache.get(key);
-    if (cached) return respond(cached, true);
+    if (cached) {
+      platform?.logAiOutcome(start, { cached: true });
+      return respond(cached, true);
+    }
     const flight = `${budgetKey}|${key}`;
     let pending = lessonsInFlight.get(flight);
     if (!pending) {
       const worstCase = estimateTokens(Math.min(chars, LESSON_CHAR_BUDGET) + PROMPT_OVERHEAD_CHARS) + lessonMaxTokens;
-      pending = spend(budgetKey, worstCase, (onUsage) =>
+      pending = spend(who, start, budgetKey, worstCase, (onUsage) =>
         createLesson(input, provider, { maxTokens: lessonMaxTokens, onUsage }),
       ).finally(() => lessonsInFlight.delete(flight));
       lessonsInFlight.set(flight, pending);
@@ -373,7 +485,9 @@ export function createApp(options: AppOptions): RequestListener {
   return async (req, res) => {
     const started = Date.now();
     const origin = req.headers.origin;
-    const path = (req.url ?? '/').split('?')[0];
+    const [rawPath, rawQuery = ''] = (req.url ?? '/').split('?');
+    const path = rawPath.replace(/\/+$/, '') || '/';
+    const method = req.method ?? 'GET';
     const cors: Record<string, string> = {};
     let status = 500;
     try {
@@ -384,40 +498,61 @@ export function createApp(options: AppOptions): RequestListener {
       }
       if (!originOk) throw new HttpError(403, 'forbidden_origin', 'This site is not allowed to use the lesson service.');
 
-      if (req.method === 'OPTIONS') {
+      if (method === 'OPTIONS') {
         status = 204;
         res.writeHead(204, {
           ...cors,
-          'access-control-allow-methods': 'GET, POST, OPTIONS',
-          'access-control-allow-headers': 'content-type',
+          'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+          'access-control-allow-headers': 'content-type, authorization',
           'access-control-max-age': '600',
         });
         res.end();
         return;
       }
-      if (req.method === 'GET' && path === '/api/health') {
+      // Sessions travel in the Authorization header, never in a cookie, so another site cannot ride on them.
+      const token = platform ? bearerToken(req) : undefined;
+      const user = token ? platform?.accounts.userForToken(token) : undefined;
+
+      if (method === 'GET' && path === '/api/health') {
         status = 200;
-        const body: HealthResponse = { ok: true, provider: provider.id, model: provider.model };
+        const provider = activeProvider();
+        const body: HealthResponse = { ok: true, provider: provider.id, model: provider.model, ...(platform ? { accounts: true } : {}) };
         send(res, 200, body, cors);
         return;
       }
-      if (req.method === 'POST' && path === '/api/lessons/generate') {
-        const body = await handleGenerate(req);
+      if (method === 'POST' && path === '/api/lessons/generate') {
+        const body = await handleGenerate(req, user);
         status = 200;
         send(res, 200, body, cors);
         return;
       }
-      if (req.method === 'POST' && path === '/api/lessons/plan') {
-        const body = await handlePlan(req);
+      if (method === 'POST' && path === '/api/lessons/plan') {
+        const body = await handlePlan(req, user);
         status = 200;
         send(res, 200, body, cors);
         return;
       }
-      if (req.method === 'POST' && path === '/api/lessons/lesson') {
-        const body = await handleLesson(req);
+      if (method === 'POST' && path === '/api/lessons/lesson') {
+        const body = await handleLesson(req, user);
         status = 200;
         send(res, 200, body, cors);
         return;
+      }
+      if (platformRoutes) {
+        const result = await platformRoutes({
+          req,
+          method,
+          path,
+          query: new URLSearchParams(rawQuery),
+          client: clientAddress(req, trustProxy),
+          user,
+          token: user ? token : undefined,
+        });
+        if (result) {
+          status = result.status;
+          send(res, result.status, result.body, cors);
+          return;
+        }
       }
       throw new HttpError(404, 'not_found', 'Not found.');
     } catch (err) {
@@ -435,14 +570,18 @@ export function createApp(options: AppOptions): RequestListener {
       } else {
         // Unknown failures get a generic message; details stay out of responses.
         error = new HttpError(500, 'provider_error', 'Something went wrong while creating the lesson.');
+        log(`unexpected ${path}: ${err instanceof Error ? err.name : 'error'}`);
       }
       status = error.status;
       const body: ApiErrorBody = { error: { code: error.code, message: error.message } };
       if (!res.headersSent) send(res, error.status, body, { ...cors, ...error.headers });
       else res.end();
     } finally {
-      // Method, path, status and timing only. Never document text or names.
-      log(`${req.method} ${path} ${status} ${Date.now() - started}ms`);
+      httpStats.total++;
+      if (status >= 500) httpStats.serverErrors++;
+      else if (status >= 400) httpStats.clientErrors++;
+      // Method, path, status and timing only. Never document text, names or query strings.
+      log(`${method} ${path} ${status} ${Date.now() - started}ms`);
     }
   };
 }

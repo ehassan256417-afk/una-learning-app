@@ -1,3 +1,4 @@
+import type { PlatformErrorCode } from '../account/contracts.ts';
 import type { BudgetUse, Course, GroundingReport, LessonPlan, PlanConcept, PlannedLesson, Section, SourceKind } from './types.ts';
 
 export type { SourceKind };
@@ -91,7 +92,8 @@ export type ApiErrorCode =
   | 'provider_error'
   | 'invalid_ai_output'
   | 'nothing_grounded'
-  | 'not_found';
+  | 'not_found'
+  | PlatformErrorCode;
 
 export interface ApiErrorBody {
   error: { code: ApiErrorCode; message: string };
@@ -101,4 +103,6 @@ export interface HealthResponse {
   ok: true;
   provider: string;
   model: string;
+  /** True when this backend has accounts, so lesson requests need a signed-in student. */
+  accounts?: boolean;
 }

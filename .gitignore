@@ -6,6 +6,8 @@ out/
 *.pdf
 *.tsbuildinfo
 .claude/
+# Accounts and learning data of real students (SQLite). Never commit.
+data/
 .DS_Store
 # Copied from node_modules at build time
 public/pdf.worker.min.mjs

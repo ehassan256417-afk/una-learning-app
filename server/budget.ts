@@ -43,6 +43,11 @@ export class CourseBudgets {
     this.now = now;
   }
 
+  /** Replaces the limits, for settings the owner changes while the server runs. */
+  setLimits(limits: BudgetLimits) {
+    this.limits = limits;
+  }
+
   private entry(key: string): Entry {
     const t = this.now();
     let e = this.entries.get(key);
